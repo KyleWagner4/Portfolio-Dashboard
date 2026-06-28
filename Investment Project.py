@@ -7,16 +7,17 @@ import requests
 import numpy as np
 from scipy.optimize import minimize
 from fpdf import FPDF
-import tempfile
 import os
-
 from supabase import create_client
-import os
 
+# ─── SUPABASE ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
+
+# ─── DATABASE FUNCTIONS ───────────────────────────────────────────
 def load_holdings():
     if not supabase:
         return DEFAULT_HOLDINGS.copy()
@@ -24,10 +25,10 @@ def load_holdings():
         result = supabase.table("holdings").select("*").execute()
         if result.data:
             return [{"Ticker": r["ticker"], "Shares": r["shares"], "Cost Basis": r["cost_basis"]} for r in result.data]
-        else:
-            return DEFAULT_HOLDINGS.copy()
+        return DEFAULT_HOLDINGS.copy()
     except:
         return DEFAULT_HOLDINGS.copy()
+
 
 def save_holdings(holdings):
     if not supabase:
@@ -42,6 +43,7 @@ def save_holdings(holdings):
             }).execute()
     except Exception as e:
         st.error(f"Database error: {e}")
+
 
 def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, realized_gain=None):
     if not supabase:
@@ -58,8 +60,8 @@ def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, re
     except:
         pass
 
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 
+# ─── CONFIG ───────────────────────────────────────────────────────
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide", page_icon="📈")
 
 st.markdown("""
@@ -145,6 +147,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─── PLOT LAYOUT ──────────────────────────────────────────────────
 PLOT_LAYOUT = dict(
     paper_bgcolor="#222222", plot_bgcolor="#222222",
     font=dict(family="Inter", color="#888888", size=11),
@@ -154,6 +158,8 @@ PLOT_LAYOUT = dict(
     margin=dict(l=40, r=40, t=40, b=40),
 )
 
+
+# ─── DEFAULTS ─────────────────────────────────────────────────────
 DEFAULT_HOLDINGS = [
     {"Ticker": "SCHP",  "Shares": 5.757,  "Cost Basis": 26.31},
     {"Ticker": "SGOV",  "Shares": 0.498,  "Cost Basis": 100.38},
@@ -166,10 +172,14 @@ DEFAULT_HOLDINGS = [
 INITIAL_INVESTMENT = 1000.00
 START_DATE = "2025-06-05"
 
+
+# ─── SESSION STATE ────────────────────────────────────────────────
 if "holdings" not in st.session_state:
     st.session_state.holdings = load_holdings()
+
 if "realized_gains" not in st.session_state:
     st.session_state.realized_gains = []
+
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────
 with st.sidebar:
@@ -179,30 +189,37 @@ with st.sidebar:
 
     st.divider()
 
+    # ── BUY ───────────────────────────────────────────────────────
     if mode == "Buy":
         st.markdown("<div class='metric-label'>Buy / Add Position</div>", unsafe_allow_html=True)
         buy_ticker = st.text_input("Ticker", placeholder="Ticker e.g. VGT", key="buy_ticker").upper().strip()
         buy_shares = st.number_input("Number of Shares", min_value=0.0001, step=0.001, format="%.3f", key="buy_shares")
-        buy_cost = st.number_input("Price Paid Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="buy_cost")
+        buy_cost   = st.number_input("Price Paid Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="buy_cost")
 
         if st.button("+ Buy"):
             if buy_ticker:
                 existing = [h["Ticker"] for h in st.session_state.holdings]
+
                 if buy_ticker in existing:
-                    holding = next(h for h in st.session_state.holdings if h["Ticker"] == buy_ticker)
-                    old_shares = holding["Shares"]
-                    old_cost = holding["Cost Basis"]
-                    new_total = old_shares + buy_shares
-                    new_avg = ((old_shares * old_cost) + (buy_shares * buy_cost)) / new_total
-                    holding["Shares"] = round(new_total, 6)
+                    holding     = next(h for h in st.session_state.holdings if h["Ticker"] == buy_ticker)
+                    old_shares  = holding["Shares"]
+                    old_cost    = holding["Cost Basis"]
+                    new_total   = old_shares + buy_shares
+                    new_avg     = ((old_shares * old_cost) + (buy_shares * buy_cost)) / new_total
+                    holding["Shares"]     = round(new_total, 6)
                     holding["Cost Basis"] = round(new_avg, 4)
+                    save_holdings(st.session_state.holdings)
+                    log_transaction(buy_ticker, "buy", buy_shares, buy_cost)
                     st.success(f"Updated {buy_ticker}: {new_total:.3f} shares @ ${new_avg:.2f} avg")
                     st.rerun()
+
                 else:
                     try:
                         price = yf.Ticker(buy_ticker).fast_info["last_price"]
                         if price and price > 0:
                             st.session_state.holdings.append({"Ticker": buy_ticker, "Shares": buy_shares, "Cost Basis": buy_cost})
+                            save_holdings(st.session_state.holdings)
+                            log_transaction(buy_ticker, "buy", buy_shares, buy_cost)
                             st.success(f"Added {buy_ticker}")
                             st.rerun()
                         else:
@@ -210,64 +227,78 @@ with st.sidebar:
                     except Exception:
                         st.error(f"Could not find {buy_ticker}")
 
+    # ── SELL ──────────────────────────────────────────────────────
     elif mode == "Sell":
         st.markdown("<div class='metric-label'>Sell / Reduce Position</div>", unsafe_allow_html=True)
         sell_tickers = [h["Ticker"] for h in st.session_state.holdings]
-        sell_ticker = st.selectbox("Position", sell_tickers, label_visibility="collapsed", key="sell_ticker")
-        sell_shares = st.number_input("Shares to Sell", min_value=0.0001, step=0.001, format="%.3f", label_visibility="collapsed", key="sell_shares")
-        sell_price = st.number_input("Sale Price Per Share", min_value=0.01, step=0.01, format="%.2f", label_visibility="collapsed", key="sell_price")
+        sell_ticker  = st.selectbox("Position", sell_tickers, label_visibility="collapsed", key="sell_ticker")
+        sell_shares  = st.number_input("Number of Shares to Sell", min_value=0.0001, step=0.001, format="%.3f", key="sell_shares")
+        sell_price   = st.number_input("Sale Price Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="sell_price")
 
         if st.button("- Sell"):
             holding = next(h for h in st.session_state.holdings if h["Ticker"] == sell_ticker)
+
             if sell_shares > holding["Shares"]:
                 st.error(f"You only have {holding['Shares']:.3f} shares of {sell_ticker}")
             else:
-                realized_gain = (sell_price - holding["Cost Basis"]) * sell_shares
-                remaining = round(holding["Shares"] - sell_shares, 6)
+                realized_gain       = (sell_price - holding["Cost Basis"]) * sell_shares
+                remaining           = round(holding["Shares"] - sell_shares, 6)
                 cost_basis_snapshot = holding["Cost Basis"]
+
                 if remaining == 0:
                     st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != sell_ticker]
                     st.success(f"Closed {sell_ticker} position")
                 else:
                     holding["Shares"] = remaining
                     st.success(f"Sold {sell_shares:.3f} shares of {sell_ticker}")
+
                 st.session_state.realized_gains.append({
-                    "Ticker": sell_ticker,
-                    "Shares Sold": sell_shares,
-                    "Sale Price": sell_price,
-                    "Cost Basis": cost_basis_snapshot,
+                    "Ticker":        sell_ticker,
+                    "Shares Sold":   sell_shares,
+                    "Sale Price":    sell_price,
+                    "Cost Basis":    cost_basis_snapshot,
                     "Realized Gain": round(realized_gain, 2),
-                    "Date": pd.Timestamp.now().strftime("%Y-%m-%d")
+                    "Date":          pd.Timestamp.now().strftime("%Y-%m-%d")
                 })
+                save_holdings(st.session_state.holdings)
+                log_transaction(sell_ticker, "sell", sell_shares, sell_price, cost_basis_snapshot, realized_gain)
                 st.rerun()
 
+    # ── EDIT ──────────────────────────────────────────────────────
     elif mode == "Edit":
         st.markdown("<div class='metric-label'>Edit Position</div>", unsafe_allow_html=True)
         edit_tickers = [h["Ticker"] for h in st.session_state.holdings]
-        edit_ticker = st.selectbox("Position", edit_tickers, label_visibility="collapsed", key="edit_ticker")
-        holding = next(h for h in st.session_state.holdings if h["Ticker"] == edit_ticker)
-        edit_shares = st.number_input("Shares", value=float(holding["Shares"]), min_value=0.0001, step=0.001, format="%.3f", label_visibility="collapsed", key="edit_shares")
-        edit_cost = st.number_input("Cost Basis", value=float(holding["Cost Basis"]), min_value=0.01, step=0.01, format="%.2f", label_visibility="collapsed", key="edit_cost")
+        edit_ticker  = st.selectbox("Position", edit_tickers, label_visibility="collapsed", key="edit_ticker")
+        holding      = next(h for h in st.session_state.holdings if h["Ticker"] == edit_ticker)
+        edit_shares  = st.number_input("Shares", value=float(holding["Shares"]), min_value=0.0001, step=0.001, format="%.3f", label_visibility="collapsed", key="edit_shares")
+        edit_cost    = st.number_input("Cost Basis", value=float(holding["Cost Basis"]), min_value=0.01, step=0.01, format="%.2f", label_visibility="collapsed", key="edit_cost")
 
         if st.button("Update"):
-            holding["Shares"] = round(edit_shares, 6)
+            holding["Shares"]     = round(edit_shares, 6)
             holding["Cost Basis"] = round(edit_cost, 4)
+            save_holdings(st.session_state.holdings)
+            log_transaction(edit_ticker, "edit", edit_shares, edit_cost)
             st.success(f"Updated {edit_ticker}")
             st.rerun()
 
         st.divider()
+
         if st.button("Remove Position"):
             st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != edit_ticker]
+            save_holdings(st.session_state.holdings)
             st.success(f"Removed {edit_ticker}")
             st.rerun()
 
     st.divider()
+
     if st.button("Reset to Default"):
-        st.session_state.holdings = DEFAULT_HOLDINGS.copy()
+        st.session_state.holdings    = DEFAULT_HOLDINGS.copy()
         st.session_state.realized_gains = []
+        save_holdings(DEFAULT_HOLDINGS.copy())
         st.rerun()
 
     st.divider()
+
     st.markdown("<div class='metric-label'>Export</div>", unsafe_allow_html=True)
     generate_pdf = st.button("Generate PDF Report")
 
@@ -281,6 +312,7 @@ with st.sidebar:
             gain_color = "#00ff88" if g["Realized Gain"] >= 0 else "#ff4d4d"
             st.markdown(f"<div style='font-size:11px;color:#888888;margin-top:6px;'>{g['Date']} · {g['Ticker']} · {g['Shares Sold']:.3f} shares · <span style='color:{gain_color};'>${g['Realized Gain']:,.2f}</span></div>", unsafe_allow_html=True)
 
+
 # ─── FETCH DATA ───────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def get_prices(tickers):
@@ -292,6 +324,7 @@ def get_prices(tickers):
             prices[t] = None
     return prices
 
+
 @st.cache_data(ttl=3600)
 def get_history(tickers, start):
     df = yf.download(list(tickers), start=start, auto_adjust=True, progress=False)["Close"]
@@ -300,12 +333,13 @@ def get_history(tickers, start):
     df.index = pd.to_datetime(df.index).tz_localize(None)
     return df.dropna(how="all")
 
+
 @st.cache_data(ttl=3600)
 def get_news(tickers):
     articles = []
     for ticker in tickers:
         try:
-            info = yf.Ticker(ticker).info
+            info  = yf.Ticker(ticker).info
             query = info.get("longName") or info.get("shortName") or ticker
         except:
             query = ticker
@@ -317,77 +351,80 @@ def get_news(tickers):
                 for a in r.get("articles", []):
                     if a.get("title") and a.get("url"):
                         articles.append({
-                            "ticker": ticker,
-                            "title": a.get("title", ""),
-                            "source": a.get("source", {}).get("name", ""),
-                            "published": a.get("publishedAt", "")[:10],
-                            "url": a.get("url", ""),
+                            "ticker":      ticker,
+                            "title":       a.get("title", ""),
+                            "source":      a.get("source", {}).get("name", ""),
+                            "published":   a.get("publishedAt", "")[:10],
+                            "url":         a.get("url", ""),
                             "description": a.get("description", ""),
                         })
         except Exception:
             pass
     return articles
 
+
 tickers = tuple(h["Ticker"] for h in st.session_state.holdings)
-prices = get_prices(tickers)
-hist = get_history(tickers + ("SPY",), START_DATE)
+prices  = get_prices(tickers)
+hist    = get_history(tickers + ("SPY",), START_DATE)
+
 
 # ─── CALCULATIONS ─────────────────────────────────────────────────
 rows = []
 for h in st.session_state.holdings:
-    ticker = h["Ticker"]
+    ticker        = h["Ticker"]
     current_price = prices.get(ticker)
     if not current_price:
         continue
     current_value = current_price * h["Shares"]
-    cost = h["Cost Basis"] * h["Shares"]
-    gain = current_value - cost
-    pct = (gain / cost) * 100
+    cost          = h["Cost Basis"] * h["Shares"]
+    gain          = current_value - cost
+    pct           = (gain / cost) * 100
     rows.append({
-        "Ticker": ticker,
-        "Shares": h["Shares"],
-        "Cost Basis": h["Cost Basis"],
+        "Ticker":        ticker,
+        "Shares":        h["Shares"],
+        "Cost Basis":    h["Cost Basis"],
         "Current Price": round(current_price, 2),
         "Current Value": round(current_value, 2),
         "Gain/Loss ($)": round(gain, 2),
         "Gain/Loss (%)": round(pct, 2),
     })
 
-df = pd.DataFrame(rows)
-df.index = df.index + 1
+df          = pd.DataFrame(rows)
+df.index    = df.index + 1
 
-total_value = df["Current Value"].sum()
-total_cost = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings)
-total_gain = total_value - total_cost
-total_pct = (total_gain / total_cost) * 100
+total_value    = df["Current Value"].sum()
+total_cost     = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings)
+total_gain     = total_value - total_cost
+total_pct      = (total_gain / total_cost) * 100
 portfolio_return = ((total_value - INITIAL_INVESTMENT) / INITIAL_INVESTMENT) * 100
 
-spy_hist = hist["SPY"].dropna()
-spy_start = float(spy_hist.iloc[0])
+spy_hist    = hist["SPY"].dropna()
+spy_start   = float(spy_hist.iloc[0])
 spy_current = float(spy_hist.iloc[-1])
-spy_return = ((spy_current - spy_start) / spy_start) * 100
-vs_spy = portfolio_return - spy_return
+spy_return  = ((spy_current - spy_start) / spy_start) * 100
+vs_spy      = portfolio_return - spy_return
 
 portfolio_hist = pd.Series(0.0, index=hist.index)
 for h in st.session_state.holdings:
     ticker = h["Ticker"]
     if ticker in hist.columns:
-        first_price = hist[ticker].dropna().iloc[0]
+        first_price     = hist[ticker].dropna().iloc[0]
         portfolio_hist += (hist[ticker] / first_price) * (h["Cost Basis"] * h["Shares"])
 
-portfolio_hist = portfolio_hist[portfolio_hist > 0]
-portfolio_norm = ((portfolio_hist - portfolio_hist.iloc[0]) / portfolio_hist.iloc[0]) * 100
-spy_norm = ((spy_hist - spy_start) / spy_start) * 100
+portfolio_hist  = portfolio_hist[portfolio_hist > 0]
+portfolio_norm  = ((portfolio_hist - portfolio_hist.iloc[0]) / portfolio_hist.iloc[0]) * 100
+spy_norm        = ((spy_hist - spy_start) / spy_start) * 100
 
-daily_returns = portfolio_hist.pct_change().dropna()
-spy_daily = spy_hist.pct_change().dropna()
+daily_returns    = portfolio_hist.pct_change().dropna()
+spy_daily        = spy_hist.pct_change().dropna()
 annualized_return = ((1 + daily_returns.mean()) ** 252 - 1) * 100
-annualized_vol = daily_returns.std() * (252 ** 0.5) * 100
-risk_free = 0.045
-sharpe = (annualized_return / 100 - risk_free) / (annualized_vol / 100)
-rolling_max = portfolio_hist.cummax()
-drawdown = (portfolio_hist - rolling_max) / rolling_max * 100
-max_drawdown = drawdown.min()
+annualized_vol   = daily_returns.std() * (252 ** 0.5) * 100
+risk_free        = 0.045
+sharpe           = (annualized_return / 100 - risk_free) / (annualized_vol / 100)
+rolling_max      = portfolio_hist.cummax()
+drawdown         = (portfolio_hist - rolling_max) / rolling_max * 100
+max_drawdown     = drawdown.min()
+
 
 # ─── PDF GENERATION ───────────────────────────────────────────────
 if generate_pdf:
@@ -411,14 +448,14 @@ if generate_pdf:
     pdf.ln(4)
 
     metrics = [
-        ("Total Value", f"${total_value:,.2f}"),
-        ("Total Gain / Loss", f"${total_gain:,.2f}"),
+        ("Total Value",            f"${total_value:,.2f}"),
+        ("Total Gain / Loss",      f"${total_gain:,.2f}"),
         ("Return Since Jun 5 2025", f"{portfolio_return:.2f}%"),
-        ("SPY Return", f"{spy_return:.2f}%"),
-        ("vs SPY", f"{vs_spy:+.2f}%"),
-        ("Sharpe Ratio", f"{sharpe:.2f}"),
-        ("Max Drawdown", f"{max_drawdown:.2f}%"),
-        ("Annualized Volatility", f"{annualized_vol:.2f}%"),
+        ("SPY Return",             f"{spy_return:.2f}%"),
+        ("vs SPY",                 f"{vs_spy:+.2f}%"),
+        ("Sharpe Ratio",           f"{sharpe:.2f}"),
+        ("Max Drawdown",           f"{max_drawdown:.2f}%"),
+        ("Annualized Volatility",  f"{annualized_vol:.2f}%"),
     ]
     for label, value in metrics:
         pdf.set_font("Helvetica", "", 9)
@@ -439,7 +476,7 @@ if generate_pdf:
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_text_color(100, 100, 100)
     col_widths = [25, 25, 28, 28, 28, 28, 28]
-    headers = ["Ticker", "Shares", "Cost Basis", "Cur. Price", "Cur. Value", "G/L ($)", "G/L (%)"]
+    headers    = ["Ticker", "Shares", "Cost Basis", "Cur. Price", "Cur. Value", "G/L ($)", "G/L (%)"]
     for i, h in enumerate(headers):
         pdf.cell(col_widths[i], 7, h, border=0, fill=True)
     pdf.ln()
@@ -453,7 +490,7 @@ if generate_pdf:
         pdf.cell(col_widths[3], 7, f"${row['Current Price']:.2f}")
         pdf.cell(col_widths[4], 7, f"${row['Current Value']:,.2f}")
         gl_dollar = row["Gain/Loss ($)"]
-        gl_pct = row["Gain/Loss (%)"]
+        gl_pct    = row["Gain/Loss (%)"]
         pdf.set_text_color(0, 150, 80) if gl_dollar >= 0 else pdf.set_text_color(200, 0, 0)
         pdf.cell(col_widths[5], 7, f"${gl_dollar:,.2f}")
         pdf.cell(col_widths[6], 7, f"{gl_pct:.2f}%")
@@ -491,39 +528,45 @@ if generate_pdf:
         mime="application/pdf"
     )
 
+
 # ─── HEADER ───────────────────────────────────────────────────────
 st.markdown("<div class='dashboard-title'>Personal Finance</div>", unsafe_allow_html=True)
 st.markdown("<div class='dashboard-subtitle'>Portfolio Dashboard</div>", unsafe_allow_html=True)
 st.markdown(f"<div style='font-size:11px;color:#888888;letter-spacing:1px;margin-bottom:24px;'>LAST UPDATED &nbsp;·&nbsp; {pd.Timestamp.now().strftime('%B %d, %Y  %I:%M %p')}</div>", unsafe_allow_html=True)
 
+
 # ─── METRICS ──────────────────────────────────────────────────────
 c1, c2, c3, c4, c5 = st.columns(5)
 gain_color = "green" if total_gain >= 0 else "red"
-vs_color = "green" if vs_spy >= 0 else "red"
-arrow = "↑" if vs_spy >= 0 else "↓"
+vs_color   = "green" if vs_spy >= 0 else "red"
+arrow      = "↑" if vs_spy >= 0 else "↓"
 
 with c1:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>Total Value</div>
         <div class='metric-value green'>${total_value:,.2f}</div>
     </div>""", unsafe_allow_html=True)
+
 with c2:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>Total Gain / Loss</div>
         <div class='metric-value {gain_color}'>${total_gain:,.2f}</div>
         <div class='metric-delta delta-{gain_color}'>↑ {total_pct:.2f}%</div>
     </div>""", unsafe_allow_html=True)
+
 with c3:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>Since Jun 5 2025</div>
         <div class='metric-value {gain_color}'>${total_value - INITIAL_INVESTMENT:,.2f}</div>
         <div class='metric-delta delta-{gain_color}'>↑ {portfolio_return:.2f}%</div>
     </div>""", unsafe_allow_html=True)
+
 with c4:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>SPY Return</div>
         <div class='metric-value'>{spy_return:.2f}%</div>
     </div>""", unsafe_allow_html=True)
+
 with c5:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>vs SPY</div>
@@ -533,10 +576,12 @@ with c5:
 
 st.divider()
 
+
 # ─── TABS ─────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Overview", "vs S&P 500", "Dollar Performance", "News", "Statistics", "Monte Carlo", "Efficient Frontier"
 ])
+
 
 # ── TAB 1: OVERVIEW ───────────────────────────────────────────────
 with tab1:
@@ -552,14 +597,15 @@ with tab1:
 
     with col2:
         colors = ["#00ff88" if x > 0 else "#ff4d4d" for x in df["Gain/Loss ($)"]]
-        fig = go.Figure(go.Bar(x=df["Ticker"], y=df["Gain/Loss ($)"],
-                               marker_color=colors, marker_line_width=0))
+        fig    = go.Figure(go.Bar(x=df["Ticker"], y=df["Gain/Loss ($)"],
+                                  marker_color=colors, marker_line_width=0))
         fig.update_layout(**PLOT_LAYOUT, title=dict(text="Gain / Loss by Position",
                           font=dict(color="#ffffff", size=13)))
         st.plotly_chart(fig, width="stretch")
 
     st.markdown("<div class='section-header'>Holdings</div>", unsafe_allow_html=True)
     st.dataframe(df, width="stretch")
+
 
 # ── TAB 2: VS S&P 500 ─────────────────────────────────────────────
 with tab2:
@@ -594,6 +640,7 @@ with tab2:
     fig.update_layout(**PLOT_LAYOUT, yaxis_title="Return (%)", xaxis_title="Date",
                       title=dict(text="Return Comparison Since Jun 5 2025", font=dict(color="#ffffff", size=13)))
     st.plotly_chart(fig, width="stretch")
+
 
 # ── TAB 3: DOLLAR PERFORMANCE ─────────────────────────────────────
 with tab3:
@@ -632,7 +679,7 @@ with tab3:
     st.plotly_chart(fig, width="stretch")
 
     st.markdown("<div class='section-header'>Individual Position Return Over Time</div>", unsafe_allow_html=True)
-    fig = go.Figure()
+    fig         = go.Figure()
     colors_list = ["#00ff88","#4a9eff","#ff4d4d","#ffd700","#a855f7","#fb923c"]
     for i, h in enumerate(st.session_state.holdings):
         ticker = h["Ticker"]
@@ -644,6 +691,7 @@ with tab3:
     fig.update_layout(**PLOT_LAYOUT, yaxis_title="Return (%)", xaxis_title="Date",
                       title=dict(text="Position Returns Over Time", font=dict(color="#ffffff", size=13)))
     st.plotly_chart(fig, width="stretch")
+
 
 # ── TAB 4: NEWS ───────────────────────────────────────────────────
 with tab4:
@@ -668,16 +716,17 @@ with tab4:
                     <div style='color:#888888;font-size:13px;margin-top:8px;'>{a['description'] or ''}</div>
                 </div>""", unsafe_allow_html=True)
 
+
 # ── TAB 5: STATISTICS ─────────────────────────────────────────────
 with tab5:
     st.markdown("<div class='section-header'>Portfolio Statistics</div>", unsafe_allow_html=True)
 
-    spy_annualized_vol = spy_daily.std() * (252 ** 0.5) * 100
+    spy_annualized_vol    = spy_daily.std() * (252 ** 0.5) * 100
     spy_annualized_return = ((1 + spy_daily.mean()) ** 252 - 1) * 100
-    spy_sharpe = (spy_annualized_return / 100 - risk_free) / (spy_annualized_vol / 100)
+    spy_sharpe            = (spy_annualized_return / 100 - risk_free) / (spy_annualized_vol / 100)
 
-    best_day = daily_returns.max() * 100
-    worst_day = daily_returns.min() * 100
+    best_day      = daily_returns.max() * 100
+    worst_day     = daily_returns.min() * 100
     best_day_date = daily_returns.idxmax().strftime("%b %d %Y")
     worst_day_date = daily_returns.idxmin().strftime("%b %d %Y")
 
@@ -735,7 +784,7 @@ with tab5:
 
     st.markdown("<div class='section-header'>Correlation Heatmap</div>", unsafe_allow_html=True)
     holding_tickers = [h["Ticker"] for h in st.session_state.holdings]
-    corr_df = hist[holding_tickers].pct_change().dropna().corr().round(2)
+    corr_df         = hist[holding_tickers].pct_change().dropna().corr().round(2)
     fig = go.Figure(go.Heatmap(
         z=corr_df.values,
         x=corr_df.columns.tolist(),
@@ -751,7 +800,7 @@ with tab5:
     st.plotly_chart(fig, width="stretch")
 
     st.markdown("<div class='section-header'>Rolling 30-Day Volatility</div>", unsafe_allow_html=True)
-    rolling_vol = daily_returns.rolling(30).std() * (252 ** 0.5) * 100
+    rolling_vol     = daily_returns.rolling(30).std() * (252 ** 0.5) * 100
     spy_rolling_vol = spy_daily.rolling(30).std() * (252 ** 0.5) * 100
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=rolling_vol.index, y=rolling_vol.values,
@@ -761,6 +810,7 @@ with tab5:
     fig.update_layout(**PLOT_LAYOUT, yaxis_title="Volatility (%)", xaxis_title="Date",
                       title=dict(text="Rolling 30-Day Annualized Volatility", font=dict(color="#ffffff", size=13)))
     st.plotly_chart(fig, width="stretch")
+
 
 # ── TAB 6: MONTE CARLO ────────────────────────────────────────────
 with tab6:
@@ -774,16 +824,16 @@ with tab6:
     with c3:
         monthly_contribution = st.number_input("Monthly Contribution ($)", min_value=0.0, step=50.0, value=0.0, format="%.2f")
 
-    trading_days = years * 252
-    mean_return = daily_returns.mean()
-    std_return = daily_returns.std()
+    trading_days   = years * 252
+    mean_return    = daily_returns.mean()
+    std_return     = daily_returns.std()
     starting_value = total_value
 
     np.random.seed(42)
     all_paths = np.zeros((trading_days, simulations))
     for i in range(simulations):
         daily = np.random.normal(mean_return, std_return, trading_days)
-        path = [starting_value]
+        path  = [starting_value]
         for j, r in enumerate(daily):
             new_val = path[-1] * (1 + r)
             if monthly_contribution > 0 and j % 21 == 0:
@@ -791,14 +841,14 @@ with tab6:
             path.append(new_val)
         all_paths[:, i] = path[1:]
 
-    p10 = np.percentile(all_paths, 10, axis=1)
-    p50 = np.percentile(all_paths, 50, axis=1)
-    p90 = np.percentile(all_paths, 90, axis=1)
+    p10          = np.percentile(all_paths, 10, axis=1)
+    p50          = np.percentile(all_paths, 50, axis=1)
+    p90          = np.percentile(all_paths, 90, axis=1)
     final_values = all_paths[-1, :]
-    worst = np.percentile(final_values, 5)
-    median = np.percentile(final_values, 50)
-    best = np.percentile(final_values, 95)
-    prob_profit = (final_values > starting_value).mean() * 100
+    worst        = np.percentile(final_values, 5)
+    median       = np.percentile(final_values, 50)
+    best         = np.percentile(final_values, 95)
+    prob_profit  = (final_values > starting_value).mean() * 100
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -851,10 +901,10 @@ with tab6:
     st.markdown("<div class='section-header'>Final Value Distribution</div>", unsafe_allow_html=True)
     fig = go.Figure()
     fig.add_trace(go.Histogram(x=final_values, nbinsx=80, marker_color="#00ff88", opacity=0.7, name="Final Values"))
-    fig.add_vline(x=worst, line_dash="dash", line_color="#ff4d4d", annotation_text="5th %ile", annotation_font_color="#ff4d4d")
-    fig.add_vline(x=median, line_dash="dash", line_color="#ffffff", annotation_text="Median", annotation_font_color="#ffffff")
-    fig.add_vline(x=best, line_dash="dash", line_color="#00ff88", annotation_text="95th %ile", annotation_font_color="#00ff88")
-    fig.add_vline(x=starting_value, line_dash="dot", line_color="#888888", annotation_text="Current", annotation_font_color="#888888")
+    fig.add_vline(x=worst,          line_dash="dash", line_color="#ff4d4d", annotation_text="5th %ile",  annotation_font_color="#ff4d4d")
+    fig.add_vline(x=median,         line_dash="dash", line_color="#ffffff", annotation_text="Median",    annotation_font_color="#ffffff")
+    fig.add_vline(x=best,           line_dash="dash", line_color="#00ff88", annotation_text="95th %ile", annotation_font_color="#00ff88")
+    fig.add_vline(x=starting_value, line_dash="dot",  line_color="#888888", annotation_text="Current",   annotation_font_color="#888888")
     fig.update_layout(**PLOT_LAYOUT, xaxis_title="Final Portfolio Value ($)", yaxis_title="Number of Simulations",
                       title=dict(text=f"Distribution of Final Portfolio Values after {years} Years",
                                  font=dict(color="#ffffff", size=13)))
@@ -871,19 +921,20 @@ with tab6:
         </div>
     </div>""", unsafe_allow_html=True)
 
+
 # ── TAB 7: EFFICIENT FRONTIER ─────────────────────────────────────
 with tab7:
     st.markdown("<div class='section-header'>Efficient Frontier</div>", unsafe_allow_html=True)
 
     holding_tickers = [h["Ticker"] for h in st.session_state.holdings]
-    returns_df = hist[holding_tickers].pct_change().dropna()
-    mean_returns = returns_df.mean() * 252
-    cov_matrix = returns_df.cov() * 252
-    n_assets = len(holding_tickers)
+    returns_df      = hist[holding_tickers].pct_change().dropna()
+    mean_returns    = returns_df.mean() * 252
+    cov_matrix      = returns_df.cov() * 252
+    n_assets        = len(holding_tickers)
 
     def portfolio_performance(weights):
-        ret = np.dot(weights, mean_returns)
-        vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        ret    = np.dot(weights, mean_returns)
+        vol    = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
         sharpe = (ret - risk_free) / vol
         return ret, vol, sharpe
 
@@ -894,23 +945,23 @@ with tab7:
         return portfolio_performance(weights)[1]
 
     constraints = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
-    bounds = tuple((0, 1) for _ in range(n_assets))
+    bounds      = tuple((0, 1) for _ in range(n_assets))
     init_weights = np.array([1/n_assets] * n_assets)
 
-    max_sharpe_result = minimize(neg_sharpe, init_weights, method="SLSQP", bounds=bounds, constraints=constraints)
+    max_sharpe_result         = minimize(neg_sharpe, init_weights, method="SLSQP", bounds=bounds, constraints=constraints)
     ms_ret, ms_vol, ms_sharpe = portfolio_performance(max_sharpe_result.x)
-    ms_weights = max_sharpe_result.x
+    ms_weights                = max_sharpe_result.x
 
-    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 100)
+    target_returns          = np.linspace(mean_returns.min(), mean_returns.max(), 100)
     frontier_vols, frontier_rets = [], []
     for target in target_returns:
-        cons = constraints + [{"type": "eq", "fun": lambda x, t=target: portfolio_performance(x)[0] - t}]
+        cons   = constraints + [{"type": "eq", "fun": lambda x, t=target: portfolio_performance(x)[0] - t}]
         result = minimize(portfolio_vol, init_weights, args=(target,), method="SLSQP", bounds=bounds, constraints=cons)
         if result.success:
             frontier_vols.append(portfolio_performance(result.x)[1])
             frontier_rets.append(target)
 
-    n_random = 3000
+    n_random                         = 3000
     rand_vols, rand_rets, rand_sharpes = [], [], []
     for _ in range(n_random):
         w = np.random.dirichlet(np.ones(n_assets))
@@ -919,7 +970,7 @@ with tab7:
         rand_rets.append(r)
         rand_sharpes.append(s)
 
-    total_val = sum(prices.get(h["Ticker"], 0) * h["Shares"] for h in st.session_state.holdings)
+    total_val    = sum(prices.get(h["Ticker"], 0) * h["Shares"] for h in st.session_state.holdings)
     curr_weights = np.array([(prices.get(h["Ticker"], 0) * h["Shares"]) / total_val for h in st.session_state.holdings])
     curr_ret, curr_vol, curr_sharpe = portfolio_performance(curr_weights)
 
@@ -950,35 +1001,47 @@ with tab7:
         </div>""", unsafe_allow_html=True)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rand_vols, y=rand_rets, mode="markers",
-                             marker=dict(color=rand_sharpes, colorscale=[[0,"#ff4d4d"],[0.5,"#ffd700"],[1,"#00ff88"]],
-                                         size=3, opacity=0.4, showscale=True,
-                                         colorbar=dict(title="Sharpe", thickness=12, len=0.5,
-                                                       tickfont=dict(color="#888888"), title_font=dict(color="#888888"))),
-                             name="Random Portfolios", hovertemplate="Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=rand_vols, y=rand_rets, mode="markers",
+        marker=dict(
+            color=rand_sharpes,
+            colorscale=[[0,"#ff4d4d"],[0.5,"#ffd700"],[1,"#00ff88"]],
+            size=3, opacity=0.4, showscale=True,
+            colorbar=dict(title="Sharpe", thickness=12, len=0.5,
+                          tickfont=dict(color="#888888"), title_font=dict(color="#888888"))
+        ),
+        name="Random Portfolios",
+        hovertemplate="Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>"
+    ))
     if frontier_vols:
         fig.add_trace(go.Scatter(x=frontier_vols, y=frontier_rets, mode="lines",
                                  line=dict(color="#ffffff", width=2), name="Efficient Frontier"))
-    fig.add_trace(go.Scatter(x=[ms_vol], y=[ms_ret], mode="markers",
-                             marker=dict(color="#ffd700", size=14, symbol="star"),
-                             name=f"Max Sharpe ({ms_sharpe:.2f})",
-                             hovertemplate=f"Max Sharpe<br>Vol: {ms_vol:.1%}<br>Return: {ms_ret:.1%}<extra></extra>"))
-    fig.add_trace(go.Scatter(x=[curr_vol], y=[curr_ret], mode="markers",
-                             marker=dict(color="#4a9eff", size=14, symbol="diamond"),
-                             name=f"Your Portfolio ({curr_sharpe:.2f})",
-                             hovertemplate=f"Your Portfolio<br>Vol: {curr_vol:.1%}<br>Return: {curr_ret:.1%}<extra></extra>"))
-    fig.update_layout(**{k: v for k, v in PLOT_LAYOUT.items() if k not in ("xaxis", "yaxis")},
-                      xaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Volatility"),
-                      yaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Return"),
-                      title=dict(text="Efficient Frontier — Risk vs Return", font=dict(color="#ffffff", size=13)))
+    fig.add_trace(go.Scatter(
+        x=[ms_vol], y=[ms_ret], mode="markers",
+        marker=dict(color="#ffd700", size=14, symbol="star"),
+        name=f"Max Sharpe ({ms_sharpe:.2f})",
+        hovertemplate=f"Max Sharpe<br>Vol: {ms_vol:.1%}<br>Return: {ms_ret:.1%}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[curr_vol], y=[curr_ret], mode="markers",
+        marker=dict(color="#4a9eff", size=14, symbol="diamond"),
+        name=f"Your Portfolio ({curr_sharpe:.2f})",
+        hovertemplate=f"Your Portfolio<br>Vol: {curr_vol:.1%}<br>Return: {curr_ret:.1%}<extra></extra>"
+    ))
+    fig.update_layout(
+        **{k: v for k, v in PLOT_LAYOUT.items() if k not in ("xaxis", "yaxis")},
+        xaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Volatility"),
+        yaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Return"),
+        title=dict(text="Efficient Frontier — Risk vs Return", font=dict(color="#ffffff", size=13))
+    )
     st.plotly_chart(fig, width="stretch")
 
     st.markdown("<div class='section-header'>Optimal Portfolio Weights vs Current</div>", unsafe_allow_html=True)
     weights_df = pd.DataFrame({
-        "Ticker": holding_tickers,
+        "Ticker":         holding_tickers,
         "Current Weight": [f"{w*100:.1f}%" for w in curr_weights],
         "Optimal Weight": [f"{w*100:.1f}%" for w in ms_weights],
-        "Difference": [f"{(ms_weights[i] - curr_weights[i])*100:+.1f}%" for i in range(n_assets)]
+        "Difference":     [f"{(ms_weights[i] - curr_weights[i])*100:+.1f}%" for i in range(n_assets)]
     })
     weights_df.index = weights_df.index + 1
 
