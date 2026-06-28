@@ -178,10 +178,15 @@ PLOT_LAYOUT = dict(
 
 
 # ─── DEFAULTS ─────────────────────────────────────────────────────
-DEFAULT_HOLDINGS = []
+DEFAULT_HOLDINGS = [
+    {"Ticker": "SPY",  "Shares": 2.0,  "Cost Basis": 480.00, "Purchase Date": "2025-01-01"},
+    {"Ticker": "QQQ",  "Shares": 1.5,  "Cost Basis": 510.00, "Purchase Date": "2025-01-01"},
+    {"Ticker": "VTI",  "Shares": 3.0,  "Cost Basis": 270.00, "Purchase Date": "2025-01-01"},
+    {"Ticker": "BND",  "Shares": 5.0,  "Cost Basis": 72.00,  "Purchase Date": "2025-01-01"},
+]
 
-INITIAL_INVESTMENT = 1000.00
-START_DATE         = "2025-06-05"
+INITIAL_INVESTMENT = 2826.00
+START_DATE         = "2025-01-01"
 
 
 # ─── SESSION STATE ────────────────────────────────────────────────
