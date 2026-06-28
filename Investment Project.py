@@ -60,6 +60,14 @@ def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, re
     except:
         pass
 
+def load_transactions():
+    if not supabase:
+        return []
+    try:
+        result = supabase.table("transactions").select("*").order("created_at", desc=True).execute()
+        return result.data
+    except:
+        return []
 
 # ─── CONFIG ───────────────────────────────────────────────────────
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide", page_icon="📈")
@@ -578,8 +586,8 @@ st.divider()
 
 
 # ─── TABS ─────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "Overview", "vs S&P 500", "Dollar Performance", "News", "Statistics", "Monte Carlo", "Efficient Frontier"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "Overview", "vs S&P 500", "Dollar Performance", "News", "Statistics", "Monte Carlo", "Efficient Frontier", "Transaction History"
 ])
 
 
@@ -1067,4 +1075,71 @@ with tab7:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    
+# ── TAB 8: TRANSACTION HISTORY ────────────────────────────────────
+with tab8:
+    st.markdown("<div class='section-header'>Transaction History</div>", unsafe_allow_html=True)
+
+    transactions = load_transactions()
+
+    if not transactions:
+        st.markdown("<div class='metric-card'><div style='color:#888888;'>No transactions recorded yet.</div></div>", unsafe_allow_html=True)
+    else:
+        # ── SUMMARY METRICS ───────────────────────────────────────
+        buys  = [t for t in transactions if t["transaction_type"] == "buy"]
+        sells = [t for t in transactions if t["transaction_type"] == "sell"]
+
+        total_invested  = sum(t["shares"] * t["price"] for t in buys)
+        total_realized  = sum(t["realized_gain"] for t in sells if t["realized_gain"]) 
+        total_sell_gain_color = "green" if total_realized >= 0 else "red"
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Total Transactions</div>
+                <div class='metric-value'>{len(transactions)}</div>
+            </div>""", unsafe_allow_html=True)
+        with m2:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Total Invested</div>
+                <div class='metric-value green'>${total_invested:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+        with m3:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Total Realized Gains</div>
+                <div class='metric-value {total_sell_gain_color}'>${total_realized:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+
+        # ── TRANSACTION TABLE ─────────────────────────────────────
+        st.markdown("<div class='section-header'>All Transactions</div>", unsafe_allow_html=True)
+
+        tx_rows = []
+        for t in transactions:
+            tx_type  = t["transaction_type"].upper()
+            realized = f"${t['realized_gain']:,.2f}" if t.get("realized_gain") is not None else "-"
+            tx_rows.append({
+                "Date":          t["transaction_date"],
+                "Type":          tx_type,
+                "Ticker":        t["ticker"],
+                "Shares":        round(t["shares"], 4),
+                "Price":         f"${t['price']:,.2f}",
+                "Total":         f"${t['shares'] * t['price']:,.2f}",
+                "Realized Gain": realized,
+            })
+
+        tx_df = pd.DataFrame(tx_rows)
+        tx_df.index = tx_df.index + 1
+        st.dataframe(tx_df, width="stretch")
+
+        # ── REALIZED GAINS CHART ──────────────────────────────────
+        if sells:
+            st.markdown("<div class='section-header'>Realized Gains Over Time</div>", unsafe_allow_html=True)
+            sell_labels = [f"{t['ticker']} {t['transaction_date'][:10]}" for t in sells if t.get("realized_gain") is not None]
+            sell_gains  = [t["realized_gain"] for t in sells if t.get("realized_gain") is not None]
+            sell_colors = ["#00ff88" if g >= 0 else "#ff4d4d" for g in sell_gains]
+
+            fig = go.Figure(go.Bar(x=sell_labels, y=sell_gains, marker_color=sell_colors, marker_line_width=0))
+            fig.update_layout(**PLOT_LAYOUT, yaxis_title="Realized Gain ($)", xaxis_title="",
+                              title=dict(text="Realized Gains by Transaction", font=dict(color="#ffffff", size=13)))
+            st.plotly_chart(fig, width="stretch")
+            
+            
