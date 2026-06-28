@@ -13,9 +13,10 @@ from supabase import create_client
 # ─── SUPABASE ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+supabase     = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
+
 
 # ─── DATABASE FUNCTIONS ───────────────────────────────────────────
 def load_holdings():
@@ -24,7 +25,12 @@ def load_holdings():
     try:
         result = supabase.table("holdings").select("*").execute()
         if result.data:
-            return [{"Ticker": r["ticker"], "Shares": r["shares"], "Cost Basis": r["cost_basis"]} for r in result.data]
+            return [{
+                "Ticker":        r["ticker"],
+                "Shares":        r["shares"],
+                "Cost Basis":    r["cost_basis"],
+                "Purchase Date": r.get("purchase_date", "")
+            } for r in result.data]
         return DEFAULT_HOLDINGS.copy()
     except:
         return DEFAULT_HOLDINGS.copy()
@@ -37,28 +43,31 @@ def save_holdings(holdings):
         supabase.table("holdings").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
         for h in holdings:
             supabase.table("holdings").insert({
-                "ticker": h["Ticker"],
-                "shares": h["Shares"],
-                "cost_basis": h["Cost Basis"]
+                "ticker":        h["Ticker"],
+                "shares":        h["Shares"],
+                "cost_basis":    h["Cost Basis"],
+                "purchase_date": h.get("Purchase Date", str(pd.Timestamp.today().date()))
             }).execute()
     except Exception as e:
         st.error(f"Database error: {e}")
 
 
-def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, realized_gain=None):
+def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, realized_gain=None, transaction_date=None):
     if not supabase:
         return
     try:
         supabase.table("transactions").insert({
-            "ticker": ticker,
-            "transaction_type": transaction_type,
-            "shares": shares,
-            "price": price,
-            "cost_basis_at_time": cost_basis,
-            "realized_gain": realized_gain,
+            "ticker":                 ticker,
+            "transaction_type":       transaction_type,
+            "shares":                 shares,
+            "price":                  price,
+            "cost_basis_at_time":     cost_basis,
+            "realized_gain":          realized_gain,
+            "transaction_date_input": transaction_date or str(pd.Timestamp.today().date()),
         }).execute()
     except:
         pass
+
 
 def load_transactions():
     if not supabase:
@@ -68,6 +77,7 @@ def load_transactions():
         return result.data
     except:
         return []
+
 
 # ─── CONFIG ───────────────────────────────────────────────────────
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide", page_icon="📈")
@@ -169,16 +179,16 @@ PLOT_LAYOUT = dict(
 
 # ─── DEFAULTS ─────────────────────────────────────────────────────
 DEFAULT_HOLDINGS = [
-    {"Ticker": "SCHP",  "Shares": 5.757,  "Cost Basis": 26.31},
-    {"Ticker": "SGOV",  "Shares": 0.498,  "Cost Basis": 100.38},
-    {"Ticker": "VGT",   "Shares": 1.288,  "Cost Basis": 76.93},
-    {"Ticker": "VNQ",   "Shares": 1.121,  "Cost Basis": 88.49},
-    {"Ticker": "VTI",   "Shares": 1.369,  "Cost Basis": 291.90},
-    {"Ticker": "VXUS",  "Shares": 2.969,  "Cost Basis": 67.34},
+    {"Ticker": "SCHP",  "Shares": 5.757,  "Cost Basis": 26.31,  "Purchase Date": "2025-06-05"},
+    {"Ticker": "SGOV",  "Shares": 0.498,  "Cost Basis": 100.38, "Purchase Date": "2025-06-05"},
+    {"Ticker": "VGT",   "Shares": 1.288,  "Cost Basis": 76.93,  "Purchase Date": "2025-06-05"},
+    {"Ticker": "VNQ",   "Shares": 1.121,  "Cost Basis": 88.49,  "Purchase Date": "2025-06-05"},
+    {"Ticker": "VTI",   "Shares": 1.369,  "Cost Basis": 291.90, "Purchase Date": "2025-06-05"},
+    {"Ticker": "VXUS",  "Shares": 2.969,  "Cost Basis": 67.34,  "Purchase Date": "2025-06-05"},
 ]
 
 INITIAL_INVESTMENT = 1000.00
-START_DATE = "2025-06-05"
+START_DATE         = "2025-06-05"
 
 
 # ─── SESSION STATE ────────────────────────────────────────────────
@@ -203,6 +213,7 @@ with st.sidebar:
         buy_ticker = st.text_input("Ticker", placeholder="Ticker e.g. VGT", key="buy_ticker").upper().strip()
         buy_shares = st.number_input("Number of Shares", min_value=0.0001, step=0.001, format="%.3f", key="buy_shares")
         buy_cost   = st.number_input("Price Paid Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="buy_cost")
+        buy_date   = st.date_input("Purchase Date", value=pd.Timestamp.today(), key="buy_date")
 
         if st.button("+ Buy"):
             if buy_ticker:
@@ -217,7 +228,7 @@ with st.sidebar:
                     holding["Shares"]     = round(new_total, 6)
                     holding["Cost Basis"] = round(new_avg, 4)
                     save_holdings(st.session_state.holdings)
-                    log_transaction(buy_ticker, "buy", buy_shares, buy_cost)
+                    log_transaction(buy_ticker, "buy", buy_shares, buy_cost, transaction_date=str(buy_date))
                     st.success(f"Updated {buy_ticker}: {new_total:.3f} shares @ ${new_avg:.2f} avg")
                     st.rerun()
 
@@ -225,9 +236,14 @@ with st.sidebar:
                     try:
                         price = yf.Ticker(buy_ticker).fast_info["last_price"]
                         if price and price > 0:
-                            st.session_state.holdings.append({"Ticker": buy_ticker, "Shares": buy_shares, "Cost Basis": buy_cost})
+                            st.session_state.holdings.append({
+                                "Ticker":        buy_ticker,
+                                "Shares":        buy_shares,
+                                "Cost Basis":    buy_cost,
+                                "Purchase Date": str(buy_date)
+                            })
                             save_holdings(st.session_state.holdings)
-                            log_transaction(buy_ticker, "buy", buy_shares, buy_cost)
+                            log_transaction(buy_ticker, "buy", buy_shares, buy_cost, transaction_date=str(buy_date))
                             st.success(f"Added {buy_ticker}")
                             st.rerun()
                         else:
@@ -242,6 +258,7 @@ with st.sidebar:
         sell_ticker  = st.selectbox("Position", sell_tickers, label_visibility="collapsed", key="sell_ticker")
         sell_shares  = st.number_input("Number of Shares to Sell", min_value=0.0001, step=0.001, format="%.3f", key="sell_shares")
         sell_price   = st.number_input("Sale Price Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="sell_price")
+        sell_date    = st.date_input("Sale Date", value=pd.Timestamp.today(), key="sell_date")
 
         if st.button("- Sell"):
             holding = next(h for h in st.session_state.holdings if h["Ticker"] == sell_ticker)
@@ -266,10 +283,10 @@ with st.sidebar:
                     "Sale Price":    sell_price,
                     "Cost Basis":    cost_basis_snapshot,
                     "Realized Gain": round(realized_gain, 2),
-                    "Date":          pd.Timestamp.now().strftime("%Y-%m-%d")
+                    "Date":          str(sell_date)
                 })
                 save_holdings(st.session_state.holdings)
-                log_transaction(sell_ticker, "sell", sell_shares, sell_price, cost_basis_snapshot, realized_gain)
+                log_transaction(sell_ticker, "sell", sell_shares, sell_price, cost_basis_snapshot, realized_gain, transaction_date=str(sell_date))
                 st.rerun()
 
     # ── EDIT ──────────────────────────────────────────────────────
@@ -300,7 +317,7 @@ with st.sidebar:
     st.divider()
 
     if st.button("Reset to Default"):
-        st.session_state.holdings    = DEFAULT_HOLDINGS.copy()
+        st.session_state.holdings       = DEFAULT_HOLDINGS.copy()
         st.session_state.realized_gains = []
         save_holdings(DEFAULT_HOLDINGS.copy())
         st.rerun()
@@ -388,22 +405,23 @@ for h in st.session_state.holdings:
     gain          = current_value - cost
     pct           = (gain / cost) * 100
     rows.append({
-        "Ticker":        ticker,
-        "Shares":        h["Shares"],
-        "Cost Basis":    h["Cost Basis"],
-        "Current Price": round(current_price, 2),
-        "Current Value": round(current_value, 2),
-        "Gain/Loss ($)": round(gain, 2),
-        "Gain/Loss (%)": round(pct, 2),
+        "Ticker":          ticker,
+        "Shares":          h["Shares"],
+        "Cost Basis":      h["Cost Basis"],
+        "Purchase Date":   h.get("Purchase Date", ""),
+        "Current Price":   round(current_price, 2),
+        "Current Value":   round(current_value, 2),
+        "Gain/Loss ($)":   round(gain, 2),
+        "Gain/Loss (%)":   round(pct, 2),
     })
 
-df          = pd.DataFrame(rows)
-df.index    = df.index + 1
+df       = pd.DataFrame(rows)
+df.index = df.index + 1
 
-total_value    = df["Current Value"].sum()
-total_cost     = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings)
-total_gain     = total_value - total_cost
-total_pct      = (total_gain / total_cost) * 100
+total_value      = df["Current Value"].sum()
+total_cost       = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings)
+total_gain       = total_value - total_cost
+total_pct        = (total_gain / total_cost) * 100
 portfolio_return = ((total_value - INITIAL_INVESTMENT) / INITIAL_INVESTMENT) * 100
 
 spy_hist    = hist["SPY"].dropna()
@@ -419,19 +437,19 @@ for h in st.session_state.holdings:
         first_price     = hist[ticker].dropna().iloc[0]
         portfolio_hist += (hist[ticker] / first_price) * (h["Cost Basis"] * h["Shares"])
 
-portfolio_hist  = portfolio_hist[portfolio_hist > 0]
-portfolio_norm  = ((portfolio_hist - portfolio_hist.iloc[0]) / portfolio_hist.iloc[0]) * 100
-spy_norm        = ((spy_hist - spy_start) / spy_start) * 100
+portfolio_hist = portfolio_hist[portfolio_hist > 0]
+portfolio_norm = ((portfolio_hist - portfolio_hist.iloc[0]) / portfolio_hist.iloc[0]) * 100
+spy_norm       = ((spy_hist - spy_start) / spy_start) * 100
 
-daily_returns    = portfolio_hist.pct_change().dropna()
-spy_daily        = spy_hist.pct_change().dropna()
+daily_returns     = portfolio_hist.pct_change().dropna()
+spy_daily         = spy_hist.pct_change().dropna()
 annualized_return = ((1 + daily_returns.mean()) ** 252 - 1) * 100
-annualized_vol   = daily_returns.std() * (252 ** 0.5) * 100
-risk_free        = 0.045
-sharpe           = (annualized_return / 100 - risk_free) / (annualized_vol / 100)
-rolling_max      = portfolio_hist.cummax()
-drawdown         = (portfolio_hist - rolling_max) / rolling_max * 100
-max_drawdown     = drawdown.min()
+annualized_vol    = daily_returns.std() * (252 ** 0.5) * 100
+risk_free         = 0.045
+sharpe            = (annualized_return / 100 - risk_free) / (annualized_vol / 100)
+rolling_max       = portfolio_hist.cummax()
+drawdown          = (portfolio_hist - rolling_max) / rolling_max * 100
+max_drawdown      = drawdown.min()
 
 
 # ─── PDF GENERATION ───────────────────────────────────────────────
@@ -456,14 +474,14 @@ if generate_pdf:
     pdf.ln(4)
 
     metrics = [
-        ("Total Value",            f"${total_value:,.2f}"),
-        ("Total Gain / Loss",      f"${total_gain:,.2f}"),
+        ("Total Value",             f"${total_value:,.2f}"),
+        ("Total Gain / Loss",       f"${total_gain:,.2f}"),
         ("Return Since Jun 5 2025", f"{portfolio_return:.2f}%"),
-        ("SPY Return",             f"{spy_return:.2f}%"),
-        ("vs SPY",                 f"{vs_spy:+.2f}%"),
-        ("Sharpe Ratio",           f"{sharpe:.2f}"),
-        ("Max Drawdown",           f"{max_drawdown:.2f}%"),
-        ("Annualized Volatility",  f"{annualized_vol:.2f}%"),
+        ("SPY Return",              f"{spy_return:.2f}%"),
+        ("vs SPY",                  f"{vs_spy:+.2f}%"),
+        ("Sharpe Ratio",            f"{sharpe:.2f}"),
+        ("Max Drawdown",            f"{max_drawdown:.2f}%"),
+        ("Annualized Volatility",   f"{annualized_vol:.2f}%"),
     ]
     for label, value in metrics:
         pdf.set_font("Helvetica", "", 9)
@@ -483,8 +501,8 @@ if generate_pdf:
     pdf.set_fill_color(245, 245, 245)
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_text_color(100, 100, 100)
-    col_widths = [25, 25, 28, 28, 28, 28, 28]
-    headers    = ["Ticker", "Shares", "Cost Basis", "Cur. Price", "Cur. Value", "G/L ($)", "G/L (%)"]
+    col_widths = [20, 18, 24, 24, 22, 24, 22, 22]
+    headers    = ["Ticker", "Shares", "Cost Basis", "Pur. Date", "Cur. Price", "Cur. Value", "G/L ($)", "G/L (%)"]
     for i, h in enumerate(headers):
         pdf.cell(col_widths[i], 7, h, border=0, fill=True)
     pdf.ln()
@@ -495,13 +513,14 @@ if generate_pdf:
         pdf.cell(col_widths[0], 7, str(row["Ticker"]))
         pdf.cell(col_widths[1], 7, str(row["Shares"]))
         pdf.cell(col_widths[2], 7, f"${row['Cost Basis']:.2f}")
-        pdf.cell(col_widths[3], 7, f"${row['Current Price']:.2f}")
-        pdf.cell(col_widths[4], 7, f"${row['Current Value']:,.2f}")
+        pdf.cell(col_widths[3], 7, str(row.get("Purchase Date", "")))
+        pdf.cell(col_widths[4], 7, f"${row['Current Price']:.2f}")
+        pdf.cell(col_widths[5], 7, f"${row['Current Value']:,.2f}")
         gl_dollar = row["Gain/Loss ($)"]
         gl_pct    = row["Gain/Loss (%)"]
         pdf.set_text_color(0, 150, 80) if gl_dollar >= 0 else pdf.set_text_color(200, 0, 0)
-        pdf.cell(col_widths[5], 7, f"${gl_dollar:,.2f}")
-        pdf.cell(col_widths[6], 7, f"{gl_pct:.2f}%")
+        pdf.cell(col_widths[6], 7, f"${gl_dollar:,.2f}")
+        pdf.cell(col_widths[7], 7, f"{gl_pct:.2f}%")
         pdf.ln()
 
     if st.session_state.realized_gains:
@@ -733,9 +752,9 @@ with tab5:
     spy_annualized_return = ((1 + spy_daily.mean()) ** 252 - 1) * 100
     spy_sharpe            = (spy_annualized_return / 100 - risk_free) / (spy_annualized_vol / 100)
 
-    best_day      = daily_returns.max() * 100
-    worst_day     = daily_returns.min() * 100
-    best_day_date = daily_returns.idxmax().strftime("%b %d %Y")
+    best_day       = daily_returns.max() * 100
+    worst_day      = daily_returns.min() * 100
+    best_day_date  = daily_returns.idxmax().strftime("%b %d %Y")
     worst_day_date = daily_returns.idxmin().strftime("%b %d %Y")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -952,15 +971,15 @@ with tab7:
     def portfolio_vol(weights, target_return):
         return portfolio_performance(weights)[1]
 
-    constraints = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
-    bounds      = tuple((0, 1) for _ in range(n_assets))
+    constraints  = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
+    bounds       = tuple((0, 1) for _ in range(n_assets))
     init_weights = np.array([1/n_assets] * n_assets)
 
     max_sharpe_result         = minimize(neg_sharpe, init_weights, method="SLSQP", bounds=bounds, constraints=constraints)
     ms_ret, ms_vol, ms_sharpe = portfolio_performance(max_sharpe_result.x)
     ms_weights                = max_sharpe_result.x
 
-    target_returns          = np.linspace(mean_returns.min(), mean_returns.max(), 100)
+    target_returns           = np.linspace(mean_returns.min(), mean_returns.max(), 100)
     frontier_vols, frontier_rets = [], []
     for target in target_returns:
         cons   = constraints + [{"type": "eq", "fun": lambda x, t=target: portfolio_performance(x)[0] - t}]
@@ -969,7 +988,7 @@ with tab7:
             frontier_vols.append(portfolio_performance(result.x)[1])
             frontier_rets.append(target)
 
-    n_random                         = 3000
+    n_random                           = 3000
     rand_vols, rand_rets, rand_sharpes = [], [], []
     for _ in range(n_random):
         w = np.random.dirichlet(np.ones(n_assets))
@@ -1075,6 +1094,7 @@ with tab7:
         </div>
     </div>""", unsafe_allow_html=True)
 
+
 # ── TAB 8: TRANSACTION HISTORY ────────────────────────────────────
 with tab8:
     st.markdown("<div class='section-header'>Transaction History</div>", unsafe_allow_html=True)
@@ -1084,12 +1104,11 @@ with tab8:
     if not transactions:
         st.markdown("<div class='metric-card'><div style='color:#888888;'>No transactions recorded yet.</div></div>", unsafe_allow_html=True)
     else:
-        # ── SUMMARY METRICS ───────────────────────────────────────
         buys  = [t for t in transactions if t["transaction_type"] == "buy"]
         sells = [t for t in transactions if t["transaction_type"] == "sell"]
 
-        total_invested  = sum(t["shares"] * t["price"] for t in buys)
-        total_realized  = sum(t["realized_gain"] for t in sells if t["realized_gain"]) 
+        total_invested = sum(t["shares"] * t["price"] for t in buys)
+        total_realized = sum(t["realized_gain"] for t in sells if t.get("realized_gain"))
         total_sell_gain_color = "green" if total_realized >= 0 else "red"
 
         m1, m2, m3 = st.columns(3)
@@ -1109,7 +1128,6 @@ with tab8:
                 <div class='metric-value {total_sell_gain_color}'>${total_realized:,.2f}</div>
             </div>""", unsafe_allow_html=True)
 
-        # ── TRANSACTION TABLE ─────────────────────────────────────
         st.markdown("<div class='section-header'>All Transactions</div>", unsafe_allow_html=True)
 
         tx_rows = []
@@ -1117,23 +1135,22 @@ with tab8:
             tx_type  = t["transaction_type"].upper()
             realized = f"${t['realized_gain']:,.2f}" if t.get("realized_gain") is not None else "-"
             tx_rows.append({
-                "Date":          t["transaction_date"],
-                "Type":          tx_type,
-                "Ticker":        t["ticker"],
-                "Shares":        round(t["shares"], 4),
-                "Price":         f"${t['price']:,.2f}",
-                "Total":         f"${t['shares'] * t['price']:,.2f}",
-                "Realized Gain": realized,
+                "Date":            t.get("transaction_date_input", t.get("transaction_date", ""))[:10] if t.get("transaction_date_input") or t.get("transaction_date") else "",
+                "Type":            tx_type,
+                "Ticker":          t["ticker"],
+                "Shares":          round(t["shares"], 4),
+                "Price":           f"${t['price']:,.2f}",
+                "Total":           f"${t['shares'] * t['price']:,.2f}",
+                "Realized Gain":   realized,
             })
 
-        tx_df = pd.DataFrame(tx_rows)
+        tx_df       = pd.DataFrame(tx_rows)
         tx_df.index = tx_df.index + 1
         st.dataframe(tx_df, width="stretch")
 
-        # ── REALIZED GAINS CHART ──────────────────────────────────
         if sells:
             st.markdown("<div class='section-header'>Realized Gains Over Time</div>", unsafe_allow_html=True)
-            sell_labels = [f"{t['ticker']} {t['transaction_date'][:10]}" for t in sells if t.get("realized_gain") is not None]
+            sell_labels = [f"{t['ticker']} {(t.get('transaction_date_input') or t.get('transaction_date', ''))[:10]}" for t in sells if t.get("realized_gain") is not None]
             sell_gains  = [t["realized_gain"] for t in sells if t.get("realized_gain") is not None]
             sell_colors = ["#00ff88" if g >= 0 else "#ff4d4d" for g in sell_gains]
 
@@ -1141,5 +1158,4 @@ with tab8:
             fig.update_layout(**PLOT_LAYOUT, yaxis_title="Realized Gain ($)", xaxis_title="",
                               title=dict(text="Realized Gains by Transaction", font=dict(color="#ffffff", size=13)))
             st.plotly_chart(fig, width="stretch")
-            
-            
+
