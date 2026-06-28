@@ -11,11 +11,11 @@ import os
 from supabase import create_client
 
 # ─── SUPABASE ─────────────────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", os.environ.get("SUPABASE_KEY", ""))
 supabase     = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
+NEWS_API_KEY = st.secrets.get("NEWS_API_KEY", os.environ.get("NEWS_API_KEY", ""))
 
 
 # ─── DATABASE FUNCTIONS ───────────────────────────────────────────
