@@ -10,6 +10,54 @@ from fpdf import FPDF
 import tempfile
 import os
 
+from supabase import create_client
+import os
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+def load_holdings():
+    if not supabase:
+        return DEFAULT_HOLDINGS.copy()
+    try:
+        result = supabase.table("holdings").select("*").execute()
+        if result.data:
+            return [{"Ticker": r["ticker"], "Shares": r["shares"], "Cost Basis": r["cost_basis"]} for r in result.data]
+        else:
+            return DEFAULT_HOLDINGS.copy()
+    except:
+        return DEFAULT_HOLDINGS.copy()
+
+def save_holdings(holdings):
+    if not supabase:
+        return
+    try:
+        supabase.table("holdings").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        for h in holdings:
+            supabase.table("holdings").insert({
+                "ticker": h["Ticker"],
+                "shares": h["Shares"],
+                "cost_basis": h["Cost Basis"]
+            }).execute()
+    except Exception as e:
+        st.error(f"Database error: {e}")
+
+def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, realized_gain=None):
+    if not supabase:
+        return
+    try:
+        supabase.table("transactions").insert({
+            "ticker": ticker,
+            "transaction_type": transaction_type,
+            "shares": shares,
+            "price": price,
+            "cost_basis_at_time": cost_basis,
+            "realized_gain": realized_gain,
+        }).execute()
+    except:
+        pass
+
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide", page_icon="📈")
@@ -119,7 +167,7 @@ INITIAL_INVESTMENT = 1000.00
 START_DATE = "2025-06-05"
 
 if "holdings" not in st.session_state:
-    st.session_state.holdings = DEFAULT_HOLDINGS.copy()
+    st.session_state.holdings = load_holdings()
 if "realized_gains" not in st.session_state:
     st.session_state.realized_gains = []
 
