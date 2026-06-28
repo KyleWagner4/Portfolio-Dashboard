@@ -178,14 +178,7 @@ PLOT_LAYOUT = dict(
 
 
 # ─── DEFAULTS ─────────────────────────────────────────────────────
-DEFAULT_HOLDINGS = [
-    {"Ticker": "SCHP",  "Shares": 5.757,  "Cost Basis": 26.31,  "Purchase Date": "2025-06-05"},
-    {"Ticker": "SGOV",  "Shares": 0.498,  "Cost Basis": 100.38, "Purchase Date": "2025-06-05"},
-    {"Ticker": "VGT",   "Shares": 1.288,  "Cost Basis": 76.93,  "Purchase Date": "2025-06-05"},
-    {"Ticker": "VNQ",   "Shares": 1.121,  "Cost Basis": 88.49,  "Purchase Date": "2025-06-05"},
-    {"Ticker": "VTI",   "Shares": 1.369,  "Cost Basis": 291.90, "Purchase Date": "2025-06-05"},
-    {"Ticker": "VXUS",  "Shares": 2.969,  "Cost Basis": 67.34,  "Purchase Date": "2025-06-05"},
-]
+DEFAULT_HOLDINGS = []
 
 INITIAL_INVESTMENT = 1000.00
 START_DATE         = "2025-06-05"
