@@ -18,12 +18,56 @@ supabase     = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUP
 NEWS_API_KEY = st.secrets.get("NEWS_API_KEY", os.environ.get("NEWS_API_KEY", ""))
 
 
+# ─── AUTH FUNCTIONS ───────────────────────────────────────────────
+def get_user():
+    if "access_token" not in st.session_state:
+        return None
+    try:
+        user = supabase.auth.get_user(st.session_state.access_token)
+        return user.user
+    except:
+        return None
+
+
+def sign_up(email, password):
+    try:
+        res = supabase.auth.sign_up({"email": email, "password": password})
+        return res.user, None
+    except Exception as e:
+        return None, str(e)
+
+
+def sign_in(email, password):
+    try:
+        res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        st.session_state.access_token = res.session.access_token
+        st.session_state.user_id      = res.user.id
+        return res.user, None
+    except Exception as e:
+        return None, str(e)
+
+
+def sign_out():
+    try:
+        supabase.auth.sign_out()
+    except:
+        pass
+    for key in ["access_token", "user_id", "holdings", "realized_gains"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 # ─── DATABASE FUNCTIONS ───────────────────────────────────────────
+def get_user_id():
+    return st.session_state.get("user_id", None)
+
+
 def load_holdings():
-    if not supabase:
+    user_id = get_user_id()
+    if not supabase or not user_id:
         return DEFAULT_HOLDINGS.copy()
     try:
-        result = supabase.table("holdings").select("*").execute()
+        result = supabase.table("holdings").select("*").eq("user_id", user_id).execute()
         if result.data:
             return [{
                 "Ticker":        r["ticker"],
@@ -37,23 +81,26 @@ def load_holdings():
 
 
 def save_holdings(holdings):
-    if not supabase:
+    user_id = get_user_id()
+    if not supabase or not user_id:
         return
     try:
-        supabase.table("holdings").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        supabase.table("holdings").delete().eq("user_id", user_id).execute()
         for h in holdings:
             supabase.table("holdings").insert({
                 "ticker":        h["Ticker"],
                 "shares":        h["Shares"],
                 "cost_basis":    h["Cost Basis"],
-                "purchase_date": h.get("Purchase Date", str(pd.Timestamp.today().date()))
+                "purchase_date": h.get("Purchase Date", str(pd.Timestamp.today().date())),
+                "user_id":       user_id
             }).execute()
     except Exception as e:
         st.error(f"Database error: {e}")
 
 
 def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, realized_gain=None, transaction_date=None):
-    if not supabase:
+    user_id = get_user_id()
+    if not supabase or not user_id:
         return
     try:
         supabase.table("transactions").insert({
@@ -64,16 +111,18 @@ def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, re
             "cost_basis_at_time":     cost_basis,
             "realized_gain":          realized_gain,
             "transaction_date_input": transaction_date or str(pd.Timestamp.today().date()),
+            "user_id":                user_id
         }).execute()
     except:
         pass
 
 
 def load_transactions():
-    if not supabase:
+    user_id = get_user_id()
+    if not supabase or not user_id:
         return []
     try:
-        result = supabase.table("transactions").select("*").order("created_at", desc=True).execute()
+        result = supabase.table("transactions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         return result.data
     except:
         return []
@@ -162,6 +211,25 @@ st.markdown("""
     div[data-testid="stDataFrame"] div[data-testid="stDataFrameGlideDataEditor"] { background: #222222 !important; }
     div[data-testid="stDataFrame"] canvas { background: #222222 !important; }
     [class*="gdg-"] { background: #222222 !important; }
+    .auth-card {
+        background: #222222;
+        border: 1px solid #2a2a2a;
+        border-radius: 16px;
+        padding: 40px;
+        max-width: 420px;
+        margin: 120px auto 0;
+    }
+    .auth-title {
+        font-size: 24px;
+        font-weight: 700;
+        color: #ffffff;
+        margin-bottom: 6px;
+    }
+    .auth-subtitle {
+        font-size: 13px;
+        color: #888888;
+        margin-bottom: 32px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -189,12 +257,45 @@ INITIAL_INVESTMENT = 2826.00
 START_DATE         = "2025-01-01"
 
 
-# ─── SESSION STATE ────────────────────────────────────────────────
-if "holdings" not in st.session_state:
-    st.session_state.holdings = load_holdings()
+# ─── AUTH SCREEN ──────────────────────────────────────────────────
+user = get_user()
 
-if "realized_gains" not in st.session_state:
-    st.session_state.realized_gains = []
+if not user:
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        st.markdown("<div style='height:80px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:24px;font-weight:700;color:#ffffff;margin-bottom:6px;'>Portfolio Dashboard</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:13px;color:#888888;margin-bottom:24px;'>Sign in to access your portfolio</div>", unsafe_allow_html=True)
+
+        auth_mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True, label_visibility="collapsed")
+        st.divider()
+
+        email    = st.text_input("Email", placeholder="you@email.com")
+        password = st.text_input("Password", type="password", placeholder="Password")
+
+        if auth_mode == "Sign In":
+            if st.button("Sign In", use_container_width=True):
+                if email and password:
+                    user, error = sign_in(email, password)
+                    if error:
+                        st.error(f"Sign in failed: {error}")
+                    else:
+                        st.session_state.holdings = load_holdings()
+                        st.session_state.realized_gains = []
+                        st.rerun()
+                else:
+                    st.error("Please enter your email and password.")
+        else:
+            if st.button("Create Account", use_container_width=True):
+                if email and password:
+                    user, error = sign_up(email, password)
+                    if error:
+                        st.error(f"Sign up failed: {error}")
+                    else:
+                        st.success("Account created. Check your email to confirm, then sign in.")
+                else:
+                    st.error("Please enter your email and password.")
+    st.stop()
 
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────
@@ -216,7 +317,6 @@ with st.sidebar:
         if st.button("+ Buy"):
             if buy_ticker:
                 existing = [h["Ticker"] for h in st.session_state.holdings]
-
                 if buy_ticker in existing:
                     holding     = next(h for h in st.session_state.holdings if h["Ticker"] == buy_ticker)
                     old_shares  = holding["Shares"]
@@ -229,7 +329,6 @@ with st.sidebar:
                     log_transaction(buy_ticker, "buy", buy_shares, buy_cost, transaction_date=str(buy_date))
                     st.success(f"Updated {buy_ticker}: {new_total:.3f} shares @ ${new_avg:.2f} avg")
                     st.rerun()
-
                 else:
                     try:
                         price = yf.Ticker(buy_ticker).fast_info["last_price"]
@@ -260,21 +359,18 @@ with st.sidebar:
 
         if st.button("- Sell"):
             holding = next(h for h in st.session_state.holdings if h["Ticker"] == sell_ticker)
-
             if sell_shares > holding["Shares"]:
                 st.error(f"You only have {holding['Shares']:.3f} shares of {sell_ticker}")
             else:
                 realized_gain       = (sell_price - holding["Cost Basis"]) * sell_shares
                 remaining           = round(holding["Shares"] - sell_shares, 6)
                 cost_basis_snapshot = holding["Cost Basis"]
-
                 if remaining == 0:
                     st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != sell_ticker]
                     st.success(f"Closed {sell_ticker} position")
                 else:
                     holding["Shares"] = remaining
                     st.success(f"Sold {sell_shares:.3f} shares of {sell_ticker}")
-
                 st.session_state.realized_gains.append({
                     "Ticker":        sell_ticker,
                     "Shares Sold":   sell_shares,
@@ -324,6 +420,12 @@ with st.sidebar:
 
     st.markdown("<div class='metric-label'>Export</div>", unsafe_allow_html=True)
     generate_pdf = st.button("Generate PDF Report")
+
+    st.divider()
+
+    if st.button("Sign Out"):
+        sign_out()
+        st.rerun()
 
     if st.session_state.realized_gains:
         st.divider()
@@ -413,14 +515,14 @@ for h in st.session_state.holdings:
         "Gain/Loss (%)":   round(pct, 2),
     })
 
-df       = pd.DataFrame(rows)
+df       = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Ticker","Shares","Cost Basis","Purchase Date","Current Price","Current Value","Gain/Loss ($)","Gain/Loss (%)"])
 df.index = df.index + 1
 
-total_value      = df["Current Value"].sum()
-total_cost       = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings)
+total_value      = df["Current Value"].sum() if not df.empty else 0.0
+total_cost       = sum(h["Cost Basis"] * h["Shares"] for h in st.session_state.holdings) if st.session_state.holdings else 0.0
 total_gain       = total_value - total_cost
-total_pct        = (total_gain / total_cost) * 100
-portfolio_return = ((total_value - INITIAL_INVESTMENT) / INITIAL_INVESTMENT) * 100
+total_pct        = (total_gain / total_cost * 100) if total_cost > 0 else 0.0
+portfolio_return = ((total_value - INITIAL_INVESTMENT) / INITIAL_INVESTMENT * 100) if INITIAL_INVESTMENT > 0 else 0.0
 
 spy_hist    = hist["SPY"].dropna()
 spy_start   = float(spy_hist.iloc[0])
@@ -474,7 +576,7 @@ if generate_pdf:
     metrics = [
         ("Total Value",             f"${total_value:,.2f}"),
         ("Total Gain / Loss",       f"${total_gain:,.2f}"),
-        ("Return Since Jun 5 2025", f"{portfolio_return:.2f}%"),
+        ("Portfolio Return",        f"{portfolio_return:.2f}%"),
         ("SPY Return",              f"{spy_return:.2f}%"),
         ("vs SPY",                  f"{vs_spy:+.2f}%"),
         ("Sharpe Ratio",            f"{sharpe:.2f}"),
@@ -542,7 +644,7 @@ if generate_pdf:
     pdf.ln(6)
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(170, 170, 170)
-    pdf.cell(0, 6, f"Portfolio Dashboard · Generated by Kyle Wagner · {pd.Timestamp.now().strftime('%B %d, %Y')}", ln=True)
+    pdf.cell(0, 6, f"Portfolio Dashboard · Generated {pd.Timestamp.now().strftime('%B %d, %Y')}", ln=True)
     pdf.cell(0, 6, "This report is for informational purposes only and does not constitute financial advice.", ln=True)
 
     pdf_bytes = pdf.output()
@@ -581,7 +683,7 @@ with c2:
 
 with c3:
     st.markdown(f"""<div class='metric-card'>
-        <div class='metric-label'>Since Jun 5 2025</div>
+        <div class='metric-label'>Portfolio Return</div>
         <div class='metric-value {gain_color}'>${total_value - INITIAL_INVESTMENT:,.2f}</div>
         <div class='metric-delta delta-{gain_color}'>↑ {portfolio_return:.2f}%</div>
     </div>""", unsafe_allow_html=True)
@@ -663,7 +765,7 @@ with tab2:
     fig.add_trace(go.Scatter(x=diff.index, y=diff.values, name="Difference",
                              line=dict(color="#ffd700", width=1, dash="dot")))
     fig.update_layout(**PLOT_LAYOUT, yaxis_title="Return (%)", xaxis_title="Date",
-                      title=dict(text="Return Comparison Since Jun 5 2025", font=dict(color="#ffffff", size=13)))
+                      title=dict(text="Return Comparison", font=dict(color="#ffffff", size=13)))
     st.plotly_chart(fig, width="stretch")
 
 
@@ -693,8 +795,8 @@ with tab3:
                              name="Portfolio Value", line=dict(color="#00ff88", width=2),
                              fill="tozeroy", fillcolor="rgba(0,255,136,0.05)"))
     fig.add_hline(y=INITIAL_INVESTMENT, line_dash="dash", line_color="#888888",
-                  annotation_text="Initial $1,000", annotation_font_color="#888888",
-                  annotation_position="bottom right")
+                  annotation_text=f"Initial ${INITIAL_INVESTMENT:,.0f}",
+                  annotation_font_color="#888888", annotation_position="bottom right")
     y_min = portfolio_hist.min() * 0.98
     y_max = portfolio_hist.max() * 1.02
     fig.update_layout(**{k: v for k, v in PLOT_LAYOUT.items() if k != "yaxis"},
@@ -1133,13 +1235,13 @@ with tab8:
             tx_type  = t["transaction_type"].upper()
             realized = f"${t['realized_gain']:,.2f}" if t.get("realized_gain") is not None else "-"
             tx_rows.append({
-                "Date":            t.get("transaction_date_input", t.get("transaction_date", ""))[:10] if t.get("transaction_date_input") or t.get("transaction_date") else "",
-                "Type":            tx_type,
-                "Ticker":          t["ticker"],
-                "Shares":          round(t["shares"], 4),
-                "Price":           f"${t['price']:,.2f}",
-                "Total":           f"${t['shares'] * t['price']:,.2f}",
-                "Realized Gain":   realized,
+                "Date":          (t.get("transaction_date_input") or t.get("transaction_date", ""))[:10],
+                "Type":          tx_type,
+                "Ticker":        t["ticker"],
+                "Shares":        round(t["shares"], 4),
+                "Price":         f"${t['price']:,.2f}",
+                "Total":         f"${t['shares'] * t['price']:,.2f}",
+                "Realized Gain": realized,
             })
 
         tx_df       = pd.DataFrame(tx_rows)
