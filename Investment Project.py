@@ -24,7 +24,10 @@ def get_user():
         return None
     try:
         user = supabase.auth.get_user(st.session_state.access_token)
-        return user.user
+        if user and user.user:
+            st.session_state.user_id = user.user.id
+            return user.user
+        return None
     except:
         return None
 
