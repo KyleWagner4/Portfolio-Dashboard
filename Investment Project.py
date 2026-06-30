@@ -60,17 +60,25 @@ def sign_out():
             del st.session_state[key]
 
 
-# ─── DATABASE FUNCTIONS ───────────────────────────────────────────
 def get_user_id():
     return st.session_state.get("user_id", None)
 
 
+def get_auth_client():
+    access_token = st.session_state.get("access_token", "")
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    client.postgrest.auth(access_token)
+    return client
+
+
+# ─── DATABASE FUNCTIONS ───────────────────────────────────────────
 def load_holdings():
     user_id = get_user_id()
     if not supabase or not user_id:
-        return DEFAULT_HOLDINGS.copy()
+        return []
     try:
-        result = supabase.table("holdings").select("*").eq("user_id", user_id).execute()
+        auth_client = get_auth_client()
+        result = auth_client.table("holdings").select("*").eq("user_id", user_id).execute()
         if result.data:
             return [{
                 "Ticker":        r["ticker"],
@@ -78,9 +86,9 @@ def load_holdings():
                 "Cost Basis":    r["cost_basis"],
                 "Purchase Date": r.get("purchase_date", "")
             } for r in result.data]
-        return DEFAULT_HOLDINGS.copy()
+        return []
     except:
-        return DEFAULT_HOLDINGS.copy()
+        return []
 
 
 def save_holdings(holdings):
@@ -88,9 +96,10 @@ def save_holdings(holdings):
     if not supabase or not user_id:
         return
     try:
-        supabase.table("holdings").delete().eq("user_id", user_id).execute()
+        auth_client = get_auth_client()
+        auth_client.table("holdings").delete().eq("user_id", user_id).execute()
         for h in holdings:
-            supabase.table("holdings").insert({
+            auth_client.table("holdings").insert({
                 "ticker":        h["Ticker"],
                 "shares":        h["Shares"],
                 "cost_basis":    h["Cost Basis"],
@@ -106,7 +115,8 @@ def log_transaction(ticker, transaction_type, shares, price, cost_basis=None, re
     if not supabase or not user_id:
         return
     try:
-        supabase.table("transactions").insert({
+        auth_client = get_auth_client()
+        auth_client.table("transactions").insert({
             "ticker":                 ticker,
             "transaction_type":       transaction_type,
             "shares":                 shares,
@@ -125,7 +135,8 @@ def load_transactions():
     if not supabase or not user_id:
         return []
     try:
-        result = supabase.table("transactions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        auth_client = get_auth_client()
+        result = auth_client.table("transactions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         return result.data
     except:
         return []
@@ -214,25 +225,6 @@ st.markdown("""
     div[data-testid="stDataFrame"] div[data-testid="stDataFrameGlideDataEditor"] { background: #222222 !important; }
     div[data-testid="stDataFrame"] canvas { background: #222222 !important; }
     [class*="gdg-"] { background: #222222 !important; }
-    .auth-card {
-        background: #222222;
-        border: 1px solid #2a2a2a;
-        border-radius: 16px;
-        padding: 40px;
-        max-width: 420px;
-        margin: 120px auto 0;
-    }
-    .auth-title {
-        font-size: 24px;
-        font-weight: 700;
-        color: #ffffff;
-        margin-bottom: 6px;
-    }
-    .auth-subtitle {
-        font-size: 13px;
-        color: #888888;
-        margin-bottom: 32px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -249,14 +241,8 @@ PLOT_LAYOUT = dict(
 
 
 # ─── DEFAULTS ─────────────────────────────────────────────────────
-DEFAULT_HOLDINGS = [
-    {"Ticker": "SPY",  "Shares": 2.0,  "Cost Basis": 480.00, "Purchase Date": "2025-01-01"},
-    {"Ticker": "QQQ",  "Shares": 1.5,  "Cost Basis": 510.00, "Purchase Date": "2025-01-01"},
-    {"Ticker": "VTI",  "Shares": 3.0,  "Cost Basis": 270.00, "Purchase Date": "2025-01-01"},
-    {"Ticker": "BND",  "Shares": 5.0,  "Cost Basis": 72.00,  "Purchase Date": "2025-01-01"},
-]
-
-INITIAL_INVESTMENT = 2826.00
+DEFAULT_HOLDINGS = []
+INITIAL_INVESTMENT = 10000.00
 START_DATE         = "2025-01-01"
 
 
@@ -301,11 +287,19 @@ if not user:
     st.stop()
 
 
+# ─── SESSION STATE ────────────────────────────────────────────────
+if "holdings" not in st.session_state:
+    st.session_state.holdings = load_holdings()
+
+if "realized_gains" not in st.session_state:
+    st.session_state.realized_gains = []
+
+
 # ─── SIDEBAR ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("<div class='section-header'>Manage Positions</div>", unsafe_allow_html=True)
 
-    mode = st.radio("Mode", ["Buy", "Sell", "Edit"], horizontal=True, label_visibility="collapsed")
+    mode = st.radio("Mode", ["Buy", "Sell"], horizontal=True, label_visibility="collapsed")
 
     st.divider()
 
@@ -353,70 +347,76 @@ with st.sidebar:
 
     # ── SELL ──────────────────────────────────────────────────────
     elif mode == "Sell":
-        st.markdown("<div class='metric-label'>Sell / Reduce Position</div>", unsafe_allow_html=True)
-        sell_tickers = [h["Ticker"] for h in st.session_state.holdings]
-        sell_ticker  = st.selectbox("Position", sell_tickers, label_visibility="collapsed", key="sell_ticker")
-        sell_shares  = st.number_input("Number of Shares to Sell", min_value=0.0001, step=0.001, format="%.3f", key="sell_shares")
-        sell_price   = st.number_input("Sale Price Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="sell_price")
-        sell_date    = st.date_input("Sale Date", value=pd.Timestamp.today(), key="sell_date")
+        if not st.session_state.holdings:
+            st.markdown("<div style='color:#888888;font-size:13px;'>No positions to sell.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='metric-label'>Sell / Reduce Position</div>", unsafe_allow_html=True)
+            sell_tickers = [h["Ticker"] for h in st.session_state.holdings]
+            sell_ticker  = st.selectbox("Position", sell_tickers, label_visibility="collapsed", key="sell_ticker")
+            sell_shares  = st.number_input("Number of Shares to Sell", min_value=0.0001, step=0.001, format="%.3f", key="sell_shares")
+            sell_price   = st.number_input("Sale Price Per Share ($)", min_value=0.01, step=0.01, format="%.2f", key="sell_price")
+            sell_date    = st.date_input("Sale Date", value=pd.Timestamp.today(), key="sell_date")
 
-        if st.button("- Sell"):
-            holding = next(h for h in st.session_state.holdings if h["Ticker"] == sell_ticker)
-            if sell_shares > holding["Shares"]:
-                st.error(f"You only have {holding['Shares']:.3f} shares of {sell_ticker}")
-            else:
-                realized_gain       = (sell_price - holding["Cost Basis"]) * sell_shares
-                remaining           = round(holding["Shares"] - sell_shares, 6)
-                cost_basis_snapshot = holding["Cost Basis"]
-                if remaining == 0:
-                    st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != sell_ticker]
-                    st.success(f"Closed {sell_ticker} position")
+            if st.button("- Sell"):
+                holding = next(h for h in st.session_state.holdings if h["Ticker"] == sell_ticker)
+                if sell_shares > holding["Shares"]:
+                    st.error(f"You only have {holding['Shares']:.3f} shares of {sell_ticker}")
                 else:
-                    holding["Shares"] = remaining
-                    st.success(f"Sold {sell_shares:.3f} shares of {sell_ticker}")
-                st.session_state.realized_gains.append({
-                    "Ticker":        sell_ticker,
-                    "Shares Sold":   sell_shares,
-                    "Sale Price":    sell_price,
-                    "Cost Basis":    cost_basis_snapshot,
-                    "Realized Gain": round(realized_gain, 2),
-                    "Date":          str(sell_date)
-                })
-                save_holdings(st.session_state.holdings)
-                log_transaction(sell_ticker, "sell", sell_shares, sell_price, cost_basis_snapshot, realized_gain, transaction_date=str(sell_date))
-                st.rerun()
+                    realized_gain       = (sell_price - holding["Cost Basis"]) * sell_shares
+                    remaining           = round(holding["Shares"] - sell_shares, 6)
+                    cost_basis_snapshot = holding["Cost Basis"]
+                    if remaining == 0:
+                        st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != sell_ticker]
+                        st.success(f"Closed {sell_ticker} position")
+                    else:
+                        holding["Shares"] = remaining
+                        st.success(f"Sold {sell_shares:.3f} shares of {sell_ticker}")
+                    st.session_state.realized_gains.append({
+                        "Ticker":        sell_ticker,
+                        "Shares Sold":   sell_shares,
+                        "Sale Price":    sell_price,
+                        "Cost Basis":    cost_basis_snapshot,
+                        "Realized Gain": round(realized_gain, 2),
+                        "Date":          str(sell_date)
+                    })
+                    save_holdings(st.session_state.holdings)
+                    log_transaction(sell_ticker, "sell", sell_shares, sell_price, cost_basis_snapshot, realized_gain, transaction_date=str(sell_date))
+                    st.rerun()
 
     # ── EDIT ──────────────────────────────────────────────────────
     elif mode == "Edit":
-        st.markdown("<div class='metric-label'>Edit Position</div>", unsafe_allow_html=True)
-        edit_tickers = [h["Ticker"] for h in st.session_state.holdings]
-        edit_ticker  = st.selectbox("Position", edit_tickers, label_visibility="collapsed", key="edit_ticker")
-        holding      = next(h for h in st.session_state.holdings if h["Ticker"] == edit_ticker)
-        edit_shares  = st.number_input("Shares", value=float(holding["Shares"]), min_value=0.0001, step=0.001, format="%.3f", label_visibility="collapsed", key="edit_shares")
-        edit_cost    = st.number_input("Cost Basis", value=float(holding["Cost Basis"]), min_value=0.01, step=0.01, format="%.2f", label_visibility="collapsed", key="edit_cost")
+        if not st.session_state.holdings:
+            st.markdown("<div style='color:#888888;font-size:13px;'>No positions to edit.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='metric-label'>Edit Position</div>", unsafe_allow_html=True)
+            edit_tickers = [h["Ticker"] for h in st.session_state.holdings]
+            edit_ticker  = st.selectbox("Position", edit_tickers, label_visibility="collapsed", key="edit_ticker")
+            holding      = next(h for h in st.session_state.holdings if h["Ticker"] == edit_ticker)
+            edit_shares  = st.number_input("Shares", value=float(holding["Shares"]), min_value=0.0001, step=0.001, format="%.3f", label_visibility="collapsed", key="edit_shares")
+            edit_cost    = st.number_input("Cost Basis", value=float(holding["Cost Basis"]), min_value=0.01, step=0.01, format="%.2f", label_visibility="collapsed", key="edit_cost")
 
-        if st.button("Update"):
-            holding["Shares"]     = round(edit_shares, 6)
-            holding["Cost Basis"] = round(edit_cost, 4)
-            save_holdings(st.session_state.holdings)
-            log_transaction(edit_ticker, "edit", edit_shares, edit_cost)
-            st.success(f"Updated {edit_ticker}")
-            st.rerun()
+            if st.button("Update"):
+                holding["Shares"]     = round(edit_shares, 6)
+                holding["Cost Basis"] = round(edit_cost, 4)
+                save_holdings(st.session_state.holdings)
+                log_transaction(edit_ticker, "edit", edit_shares, edit_cost)
+                st.success(f"Updated {edit_ticker}")
+                st.rerun()
 
-        st.divider()
+            st.divider()
 
-        if st.button("Remove Position"):
-            st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != edit_ticker]
-            save_holdings(st.session_state.holdings)
-            st.success(f"Removed {edit_ticker}")
-            st.rerun()
+            if st.button("Remove Position"):
+                st.session_state.holdings = [h for h in st.session_state.holdings if h["Ticker"] != edit_ticker]
+                save_holdings(st.session_state.holdings)
+                st.success(f"Removed {edit_ticker}")
+                st.rerun()
 
     st.divider()
 
     if st.button("Reset to Default"):
-        st.session_state.holdings       = DEFAULT_HOLDINGS.copy()
+        st.session_state.holdings       = []
         st.session_state.realized_gains = []
-        save_holdings(DEFAULT_HOLDINGS.copy())
+        save_holdings([])
         st.rerun()
 
     st.divider()
@@ -455,6 +455,8 @@ def get_prices(tickers):
 
 @st.cache_data(ttl=3600)
 def get_history(tickers, start):
+    if not tickers:
+        return pd.DataFrame()
     df = yf.download(list(tickers), start=start, auto_adjust=True, progress=False)["Close"]
     if isinstance(df, pd.Series):
         df = df.to_frame()
@@ -491,6 +493,23 @@ def get_news(tickers):
     return articles
 
 
+# ─── HEADER ───────────────────────────────────────────────────────
+st.markdown("<div class='dashboard-title'>Personal Finance</div>", unsafe_allow_html=True)
+st.markdown("<div class='dashboard-subtitle'>Portfolio Dashboard</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='font-size:11px;color:#888888;letter-spacing:1px;margin-bottom:24px;'>LAST UPDATED &nbsp;·&nbsp; {pd.Timestamp.now().strftime('%B %d, %Y  %I:%M %p')}</div>", unsafe_allow_html=True)
+
+
+# ─── EMPTY STATE ──────────────────────────────────────────────────
+if not st.session_state.holdings:
+    st.markdown("""
+    <div class='metric-card' style='text-align:center;padding:60px 24px;margin-top:32px;'>
+        <div style='font-size:20px;font-weight:600;color:#ffffff;margin-bottom:10px;'>No positions yet</div>
+        <div style='color:#888888;font-size:14px;'>Use the Buy mode in the sidebar to add your first position.</div>
+    </div>""", unsafe_allow_html=True)
+    st.stop()
+
+
+# ─── DATA ─────────────────────────────────────────────────────────
 tickers = tuple(h["Ticker"] for h in st.session_state.holdings)
 prices  = get_prices(tickers)
 hist    = get_history(tickers + ("SPY",), START_DATE)
@@ -577,14 +596,14 @@ if generate_pdf:
     pdf.ln(4)
 
     metrics = [
-        ("Total Value",             f"${total_value:,.2f}"),
-        ("Total Gain / Loss",       f"${total_gain:,.2f}"),
-        ("Portfolio Return",        f"{portfolio_return:.2f}%"),
-        ("SPY Return",              f"{spy_return:.2f}%"),
-        ("vs SPY",                  f"{vs_spy:+.2f}%"),
-        ("Sharpe Ratio",            f"{sharpe:.2f}"),
-        ("Max Drawdown",            f"{max_drawdown:.2f}%"),
-        ("Annualized Volatility",   f"{annualized_vol:.2f}%"),
+        ("Total Value",           f"${total_value:,.2f}"),
+        ("Total Gain / Loss",     f"${total_gain:,.2f}"),
+        ("Portfolio Return",      f"{portfolio_return:.2f}%"),
+        ("SPY Return",            f"{spy_return:.2f}%"),
+        ("vs SPY",                f"{vs_spy:+.2f}%"),
+        ("Sharpe Ratio",          f"{sharpe:.2f}"),
+        ("Max Drawdown",          f"{max_drawdown:.2f}%"),
+        ("Annualized Volatility", f"{annualized_vol:.2f}%"),
     ]
     for label, value in metrics:
         pdf.set_font("Helvetica", "", 9)
@@ -659,12 +678,6 @@ if generate_pdf:
     )
 
 
-# ─── HEADER ───────────────────────────────────────────────────────
-st.markdown("<div class='dashboard-title'>Personal Finance</div>", unsafe_allow_html=True)
-st.markdown("<div class='dashboard-subtitle'>Portfolio Dashboard</div>", unsafe_allow_html=True)
-st.markdown(f"<div style='font-size:11px;color:#888888;letter-spacing:1px;margin-bottom:24px;'>LAST UPDATED &nbsp;·&nbsp; {pd.Timestamp.now().strftime('%B %d, %Y  %I:%M %p')}</div>", unsafe_allow_html=True)
-
-
 # ─── METRICS ──────────────────────────────────────────────────────
 c1, c2, c3, c4, c5 = st.columns(5)
 gain_color = "green" if total_gain >= 0 else "red"
@@ -681,14 +694,14 @@ with c2:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>Total Gain / Loss</div>
         <div class='metric-value {gain_color}'>${total_gain:,.2f}</div>
-        <div class='metric-delta delta-{gain_color}'>↑ {total_pct:.2f}%</div>
+        <div class='metric-delta delta-{gain_color}'>{total_pct:.2f}%</div>
     </div>""", unsafe_allow_html=True)
 
 with c3:
     st.markdown(f"""<div class='metric-card'>
         <div class='metric-label'>Portfolio Return</div>
         <div class='metric-value {gain_color}'>${total_value - INITIAL_INVESTMENT:,.2f}</div>
-        <div class='metric-delta delta-{gain_color}'>↑ {portfolio_return:.2f}%</div>
+        <div class='metric-delta delta-{gain_color}'>{portfolio_return:.2f}%</div>
     </div>""", unsafe_allow_html=True)
 
 with c4:
@@ -1056,146 +1069,138 @@ with tab6:
 with tab7:
     st.markdown("<div class='section-header'>Efficient Frontier</div>", unsafe_allow_html=True)
 
-    holding_tickers = [h["Ticker"] for h in st.session_state.holdings]
-    returns_df      = hist[holding_tickers].pct_change().dropna()
-    mean_returns    = returns_df.mean() * 252
-    cov_matrix      = returns_df.cov() * 252
-    n_assets        = len(holding_tickers)
+    if len(st.session_state.holdings) < 2:
+        st.markdown("<div class='metric-card'><div style='color:#888888;'>Add at least 2 positions to view the Efficient Frontier.</div></div>", unsafe_allow_html=True)
+    else:
+        holding_tickers = [h["Ticker"] for h in st.session_state.holdings]
+        returns_df      = hist[holding_tickers].pct_change().dropna()
+        mean_returns    = returns_df.mean() * 252
+        cov_matrix      = returns_df.cov() * 252
+        n_assets        = len(holding_tickers)
 
-    def portfolio_performance(weights):
-        ret    = np.dot(weights, mean_returns)
-        vol    = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-        sharpe = (ret - risk_free) / vol
-        return ret, vol, sharpe
+        def portfolio_performance(weights):
+            ret    = np.dot(weights, mean_returns)
+            vol    = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            sharpe = (ret - risk_free) / vol
+            return ret, vol, sharpe
 
-    def neg_sharpe(weights):
-        return -portfolio_performance(weights)[2]
+        def neg_sharpe(weights):
+            return -portfolio_performance(weights)[2]
 
-    def portfolio_vol(weights, target_return):
-        return portfolio_performance(weights)[1]
+        def portfolio_vol(weights, target_return):
+            return portfolio_performance(weights)[1]
 
-    constraints  = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
-    bounds       = tuple((0, 1) for _ in range(n_assets))
-    init_weights = np.array([1/n_assets] * n_assets)
+        constraints  = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
+        bounds       = tuple((0, 1) for _ in range(n_assets))
+        init_weights = np.array([1/n_assets] * n_assets)
 
-    max_sharpe_result         = minimize(neg_sharpe, init_weights, method="SLSQP", bounds=bounds, constraints=constraints)
-    ms_ret, ms_vol, ms_sharpe = portfolio_performance(max_sharpe_result.x)
-    ms_weights                = max_sharpe_result.x
+        max_sharpe_result         = minimize(neg_sharpe, init_weights, method="SLSQP", bounds=bounds, constraints=constraints)
+        ms_ret, ms_vol, ms_sharpe = portfolio_performance(max_sharpe_result.x)
+        ms_weights                = max_sharpe_result.x
 
-    target_returns           = np.linspace(mean_returns.min(), mean_returns.max(), 100)
-    frontier_vols, frontier_rets = [], []
-    for target in target_returns:
-        cons   = constraints + [{"type": "eq", "fun": lambda x, t=target: portfolio_performance(x)[0] - t}]
-        result = minimize(portfolio_vol, init_weights, args=(target,), method="SLSQP", bounds=bounds, constraints=cons)
-        if result.success:
-            frontier_vols.append(portfolio_performance(result.x)[1])
-            frontier_rets.append(target)
+        target_returns           = np.linspace(mean_returns.min(), mean_returns.max(), 100)
+        frontier_vols, frontier_rets = [], []
+        for target in target_returns:
+            cons   = constraints + [{"type": "eq", "fun": lambda x, t=target: portfolio_performance(x)[0] - t}]
+            result = minimize(portfolio_vol, init_weights, args=(target,), method="SLSQP", bounds=bounds, constraints=cons)
+            if result.success:
+                frontier_vols.append(portfolio_performance(result.x)[1])
+                frontier_rets.append(target)
 
-    n_random                           = 3000
-    rand_vols, rand_rets, rand_sharpes = [], [], []
-    for _ in range(n_random):
-        w = np.random.dirichlet(np.ones(n_assets))
-        r, v, s = portfolio_performance(w)
-        rand_vols.append(v)
-        rand_rets.append(r)
-        rand_sharpes.append(s)
+        n_random                           = 3000
+        rand_vols, rand_rets, rand_sharpes = [], [], []
+        for _ in range(n_random):
+            w = np.random.dirichlet(np.ones(n_assets))
+            r, v, s = portfolio_performance(w)
+            rand_vols.append(v)
+            rand_rets.append(r)
+            rand_sharpes.append(s)
 
-    total_val    = sum(prices.get(h["Ticker"], 0) * h["Shares"] for h in st.session_state.holdings)
-    curr_weights = np.array([(prices.get(h["Ticker"], 0) * h["Shares"]) / total_val for h in st.session_state.holdings])
-    curr_ret, curr_vol, curr_sharpe = portfolio_performance(curr_weights)
+        total_val    = sum(prices.get(h["Ticker"], 0) * h["Shares"] for h in st.session_state.holdings)
+        curr_weights = np.array([(prices.get(h["Ticker"], 0) * h["Shares"]) / total_val for h in st.session_state.holdings])
+        curr_ret, curr_vol, curr_sharpe = portfolio_performance(curr_weights)
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.markdown(f"""<div class='metric-card'>
-            <div class='metric-label'>Your Sharpe Ratio</div>
-            <div class='metric-value {"green" if curr_sharpe > 1 else "red"}'>{curr_sharpe:.2f}</div>
-            <div class='metric-delta' style='color:#888888;'>Current allocation</div>
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Your Sharpe Ratio</div>
+                <div class='metric-value {"green" if curr_sharpe > 1 else "red"}'>{curr_sharpe:.2f}</div>
+                <div class='metric-delta' style='color:#888888;'>Current allocation</div>
+            </div>""", unsafe_allow_html=True)
+        with m2:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Max Sharpe Ratio</div>
+                <div class='metric-value green'>{ms_sharpe:.2f}</div>
+                <div class='metric-delta' style='color:#888888;'>Optimal allocation</div>
+            </div>""", unsafe_allow_html=True)
+        with m3:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Your Volatility</div>
+                <div class='metric-value'>{curr_vol*100:.2f}%</div>
+                <div class='metric-delta' style='color:#888888;'>Annualized</div>
+            </div>""", unsafe_allow_html=True)
+        with m4:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-label'>Optimal Volatility</div>
+                <div class='metric-value'>{ms_vol*100:.2f}%</div>
+                <div class='metric-delta' style='color:#888888;'>At max Sharpe</div>
+            </div>""", unsafe_allow_html=True)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=rand_vols, y=rand_rets, mode="markers",
+            marker=dict(color=rand_sharpes, colorscale=[[0,"#ff4d4d"],[0.5,"#ffd700"],[1,"#00ff88"]],
+                        size=3, opacity=0.4, showscale=True,
+                        colorbar=dict(title="Sharpe", thickness=12, len=0.5,
+                                      tickfont=dict(color="#888888"), title_font=dict(color="#888888"))),
+            name="Random Portfolios", hovertemplate="Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>"
+        ))
+        if frontier_vols:
+            fig.add_trace(go.Scatter(x=frontier_vols, y=frontier_rets, mode="lines",
+                                     line=dict(color="#ffffff", width=2), name="Efficient Frontier"))
+        fig.add_trace(go.Scatter(x=[ms_vol], y=[ms_ret], mode="markers",
+                                 marker=dict(color="#ffd700", size=14, symbol="star"),
+                                 name=f"Max Sharpe ({ms_sharpe:.2f})",
+                                 hovertemplate=f"Max Sharpe<br>Vol: {ms_vol:.1%}<br>Return: {ms_ret:.1%}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[curr_vol], y=[curr_ret], mode="markers",
+                                 marker=dict(color="#4a9eff", size=14, symbol="diamond"),
+                                 name=f"Your Portfolio ({curr_sharpe:.2f})",
+                                 hovertemplate=f"Your Portfolio<br>Vol: {curr_vol:.1%}<br>Return: {curr_ret:.1%}<extra></extra>"))
+        fig.update_layout(**{k: v for k, v in PLOT_LAYOUT.items() if k not in ("xaxis", "yaxis")},
+                          xaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Volatility"),
+                          yaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Return"),
+                          title=dict(text="Efficient Frontier — Risk vs Return", font=dict(color="#ffffff", size=13)))
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown("<div class='section-header'>Optimal Portfolio Weights vs Current</div>", unsafe_allow_html=True)
+        weights_df = pd.DataFrame({
+            "Ticker":         holding_tickers,
+            "Current Weight": [f"{w*100:.1f}%" for w in curr_weights],
+            "Optimal Weight": [f"{w*100:.1f}%" for w in ms_weights],
+            "Difference":     [f"{(ms_weights[i] - curr_weights[i])*100:+.1f}%" for i in range(n_assets)]
+        })
+        weights_df.index = weights_df.index + 1
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=holding_tickers, y=curr_weights*100, name="Current",
+                             marker_color="#4a9eff", marker_line_width=0))
+        fig.add_trace(go.Bar(x=holding_tickers, y=ms_weights*100, name="Optimal (Max Sharpe)",
+                             marker_color="#ffd700", marker_line_width=0))
+        fig.update_layout(**PLOT_LAYOUT, barmode="group", yaxis_title="Weight (%)", xaxis_title="",
+                          title=dict(text="Current vs Optimal Weights", font=dict(color="#ffffff", size=13)))
+        st.plotly_chart(fig, width="stretch")
+
+        st.dataframe(weights_df, width="stretch")
+
+        st.markdown(f"""<div class='metric-card' style='margin-top:16px;'>
+            <div class='metric-label'>Methodology</div>
+            <div style='color:#888888;font-size:13px;line-height:1.6;'>
+                The Efficient Frontier represents all portfolios that maximize return for a given level of risk using
+                <strong style='color:#ffffff;'>Markowitz Mean-Variance Optimization</strong>. The
+                <strong style='color:#ffffff;'>star</strong> marks the Maximum Sharpe Ratio portfolio.
+                The <strong style='color:#ffffff;'>diamond</strong> marks your current allocation.
+            </div>
         </div>""", unsafe_allow_html=True)
-    with m2:
-        st.markdown(f"""<div class='metric-card'>
-            <div class='metric-label'>Max Sharpe Ratio</div>
-            <div class='metric-value green'>{ms_sharpe:.2f}</div>
-            <div class='metric-delta' style='color:#888888;'>Optimal allocation</div>
-        </div>""", unsafe_allow_html=True)
-    with m3:
-        st.markdown(f"""<div class='metric-card'>
-            <div class='metric-label'>Your Volatility</div>
-            <div class='metric-value'>{curr_vol*100:.2f}%</div>
-            <div class='metric-delta' style='color:#888888;'>Annualized</div>
-        </div>""", unsafe_allow_html=True)
-    with m4:
-        st.markdown(f"""<div class='metric-card'>
-            <div class='metric-label'>Optimal Volatility</div>
-            <div class='metric-value'>{ms_vol*100:.2f}%</div>
-            <div class='metric-delta' style='color:#888888;'>At max Sharpe</div>
-        </div>""", unsafe_allow_html=True)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=rand_vols, y=rand_rets, mode="markers",
-        marker=dict(
-            color=rand_sharpes,
-            colorscale=[[0,"#ff4d4d"],[0.5,"#ffd700"],[1,"#00ff88"]],
-            size=3, opacity=0.4, showscale=True,
-            colorbar=dict(title="Sharpe", thickness=12, len=0.5,
-                          tickfont=dict(color="#888888"), title_font=dict(color="#888888"))
-        ),
-        name="Random Portfolios",
-        hovertemplate="Vol: %{x:.1%}<br>Return: %{y:.1%}<extra></extra>"
-    ))
-    if frontier_vols:
-        fig.add_trace(go.Scatter(x=frontier_vols, y=frontier_rets, mode="lines",
-                                 line=dict(color="#ffffff", width=2), name="Efficient Frontier"))
-    fig.add_trace(go.Scatter(
-        x=[ms_vol], y=[ms_ret], mode="markers",
-        marker=dict(color="#ffd700", size=14, symbol="star"),
-        name=f"Max Sharpe ({ms_sharpe:.2f})",
-        hovertemplate=f"Max Sharpe<br>Vol: {ms_vol:.1%}<br>Return: {ms_ret:.1%}<extra></extra>"
-    ))
-    fig.add_trace(go.Scatter(
-        x=[curr_vol], y=[curr_ret], mode="markers",
-        marker=dict(color="#4a9eff", size=14, symbol="diamond"),
-        name=f"Your Portfolio ({curr_sharpe:.2f})",
-        hovertemplate=f"Your Portfolio<br>Vol: {curr_vol:.1%}<br>Return: {curr_ret:.1%}<extra></extra>"
-    ))
-    fig.update_layout(
-        **{k: v for k, v in PLOT_LAYOUT.items() if k not in ("xaxis", "yaxis")},
-        xaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Volatility"),
-        yaxis=dict(gridcolor="#2a2a2a", tickformat=".0%", title="Annualized Return"),
-        title=dict(text="Efficient Frontier — Risk vs Return", font=dict(color="#ffffff", size=13))
-    )
-    st.plotly_chart(fig, width="stretch")
-
-    st.markdown("<div class='section-header'>Optimal Portfolio Weights vs Current</div>", unsafe_allow_html=True)
-    weights_df = pd.DataFrame({
-        "Ticker":         holding_tickers,
-        "Current Weight": [f"{w*100:.1f}%" for w in curr_weights],
-        "Optimal Weight": [f"{w*100:.1f}%" for w in ms_weights],
-        "Difference":     [f"{(ms_weights[i] - curr_weights[i])*100:+.1f}%" for i in range(n_assets)]
-    })
-    weights_df.index = weights_df.index + 1
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=holding_tickers, y=curr_weights*100, name="Current",
-                         marker_color="#4a9eff", marker_line_width=0))
-    fig.add_trace(go.Bar(x=holding_tickers, y=ms_weights*100, name="Optimal (Max Sharpe)",
-                         marker_color="#ffd700", marker_line_width=0))
-    fig.update_layout(**PLOT_LAYOUT, barmode="group", yaxis_title="Weight (%)", xaxis_title="",
-                      title=dict(text="Current vs Optimal Weights", font=dict(color="#ffffff", size=13)))
-    st.plotly_chart(fig, width="stretch")
-
-    st.dataframe(weights_df, width="stretch")
-
-    st.markdown(f"""<div class='metric-card' style='margin-top:16px;'>
-        <div class='metric-label'>Methodology</div>
-        <div style='color:#888888;font-size:13px;line-height:1.6;'>
-            The Efficient Frontier represents all portfolios that maximize return for a given level of risk using
-            <strong style='color:#ffffff;'>Markowitz Mean-Variance Optimization</strong>. The
-            <strong style='color:#ffffff;'>star</strong> marks the Maximum Sharpe Ratio portfolio —
-            the theoretically optimal allocation given your current holdings. The
-            <strong style='color:#ffffff;'>diamond</strong> marks your current allocation.
-        </div>
-    </div>""", unsafe_allow_html=True)
 
 
 # ── TAB 8: TRANSACTION HISTORY ────────────────────────────────────
@@ -1210,8 +1215,8 @@ with tab8:
         buys  = [t for t in transactions if t["transaction_type"] == "buy"]
         sells = [t for t in transactions if t["transaction_type"] == "sell"]
 
-        total_invested = sum(t["shares"] * t["price"] for t in buys)
-        total_realized = sum(t["realized_gain"] for t in sells if t.get("realized_gain"))
+        total_invested        = sum(t["shares"] * t["price"] for t in buys)
+        total_realized        = sum(t["realized_gain"] for t in sells if t.get("realized_gain"))
         total_sell_gain_color = "green" if total_realized >= 0 else "red"
 
         m1, m2, m3 = st.columns(3)
@@ -1235,11 +1240,10 @@ with tab8:
 
         tx_rows = []
         for t in transactions:
-            tx_type  = t["transaction_type"].upper()
             realized = f"${t['realized_gain']:,.2f}" if t.get("realized_gain") is not None else "-"
             tx_rows.append({
                 "Date":          (t.get("transaction_date_input") or t.get("transaction_date", ""))[:10],
-                "Type":          tx_type,
+                "Type":          t["transaction_type"].upper(),
                 "Ticker":        t["ticker"],
                 "Shares":        round(t["shares"], 4),
                 "Price":         f"${t['price']:,.2f}",
