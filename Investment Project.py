@@ -241,9 +241,11 @@ PLOT_LAYOUT = dict(
 
 
 # ─── DEFAULTS ─────────────────────────────────────────────────────
+# These are only used as a fallback for brand-new accounts that have
+# holdings (e.g. manually added) but no logged buy transactions yet.
 DEFAULT_HOLDINGS = []
-INITIAL_INVESTMENT = 10000.00
-START_DATE         = "2025-01-01"
+DEFAULT_INITIAL_INVESTMENT = 10000.00
+DEFAULT_START_DATE         = "2025-01-01"
 
 
 # ─── AUTH SCREEN ──────────────────────────────────────────────────
@@ -507,6 +509,26 @@ if not st.session_state.holdings:
         <div style='color:#888888;font-size:14px;'>Use the Buy mode in the sidebar to add your first position.</div>
     </div>""", unsafe_allow_html=True)
     st.stop()
+
+
+# ─── DERIVE INITIAL INVESTMENT & START DATE FROM TRANSACTION HISTORY ──
+# Instead of hardcoded defaults, calculate these from the user's actual
+# logged buy transactions: START_DATE = earliest buy date, and
+# INITIAL_INVESTMENT = total dollars deployed across all buys.
+all_transactions = load_transactions()
+buy_transactions  = [t for t in all_transactions if t["transaction_type"] == "buy"]
+
+if buy_transactions:
+    buy_dates = [
+        (t.get("transaction_date_input") or t.get("transaction_date") or "")[:10]
+        for t in buy_transactions
+    ]
+    buy_dates = [d for d in buy_dates if d]
+    START_DATE         = min(buy_dates) if buy_dates else DEFAULT_START_DATE
+    INITIAL_INVESTMENT = sum(t["shares"] * t["price"] for t in buy_transactions)
+else:
+    START_DATE         = DEFAULT_START_DATE
+    INITIAL_INVESTMENT = DEFAULT_INITIAL_INVESTMENT
 
 
 # ─── DATA ─────────────────────────────────────────────────────────
@@ -1207,7 +1229,7 @@ with tab7:
 with tab8:
     st.markdown("<div class='section-header'>Transaction History</div>", unsafe_allow_html=True)
 
-    transactions = load_transactions()
+    transactions = all_transactions
 
     if not transactions:
         st.markdown("<div class='metric-card'><div style='color:#888888;'>No transactions recorded yet.</div></div>", unsafe_allow_html=True)
@@ -1266,3 +1288,4 @@ with tab8:
                               title=dict(text="Realized Gains by Transaction", font=dict(color="#ffffff", size=13)))
             st.plotly_chart(fig, width="stretch")
 
+            
